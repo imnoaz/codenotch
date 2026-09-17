@@ -480,6 +480,7 @@ final class NotchWindowController {
             windowCount: snapshot.windows.count,
             groupCount: snapshot.windowGroupCount,
             moneyWindowCount: snapshot.windows.filter { $0.money != nil }.count,
+            workweekPaceWindowCount: snapshot.windows.filter { WorkweekIdealUsage.isEligible($0, providerID: snapshot.providerID) }.count,
             usageDetailGroupCount: snapshot.usageDetail?.visibleGroups.count ?? 0,
             sessionCount: snapshot.localModel == nil ? (model.activity(for: snapshot.id)?.sessions.count ?? 0) : 0,
             sessionCap: model.sessionCap,

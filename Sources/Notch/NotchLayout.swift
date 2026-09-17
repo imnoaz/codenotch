@@ -145,6 +145,13 @@ enum NotchLayout {
     static let headerToBlock = Design.px(21)
     static let labelToBar    = Design.px(16.8)
     static let barToUsed     = Design.px(17.8)
+    // The workweek ideal-usage bars under a weekly window's own bar: half the
+    // main bar's weight, since they are a reference line rather than a second
+    // reading of the same rank.
+    static let thinBarHeight = Design.px(5.25)
+    static let barToThinBar  = Design.px(10)
+    static let thinBarLabelToBar = Design.px(6)
+    static let thinBarSpacing = Design.px(6)
     static let blockSpacing  = Design.px(20)
     static let moneyBarHeight = Design.px(12)
     static let moneyBarToStats = Design.px(14)
@@ -332,7 +339,8 @@ enum NotchLayout {
     }
 
     static func cardHeight(windowCount: Int, groupCount: Int = 0,
-                           moneyWindowCount: Int = 0, usageDetailGroupCount: Int = 0,
+                           moneyWindowCount: Int = 0, workweekPaceWindowCount: Int = 0,
+                           usageDetailGroupCount: Int = 0,
                            sessionCount: Int = 0,
                            sessionCap: Int = defaultSessionCap,
                            statusMessage: String? = nil,
@@ -370,10 +378,17 @@ enum NotchLayout {
                 + moneyBarToStats + 2 * cardBodyLineHeight + moneyStatGap
             // A compact (count-only) row: a single SplitRow line.
             let compactBlock = cardBodyLineHeight
+            // The two workweek ideal-usage bars a `weekly_*` window grows: a
+            // label line, then the labelled bar, then the unlabelled one,
+            // each with its own gap from what comes before it.
+            let workweekPaceBlock = barToThinBar + cardBodyLineHeight
+                + thinBarLabelToBar + thinBarHeight
+                + thinBarSpacing + thinBarHeight
             height += headerToBlock
                 + CGFloat(fullCount) * fullBlock
                 + CGFloat(moneyCount) * moneyBlock
                 + CGFloat(compactRowCount) * compactBlock
+                + CGFloat(max(0, workweekPaceWindowCount)) * workweekPaceBlock
                 + CGFloat(windowCount - 1) * blockSpacing
             if groupCount > 0 {
                 // Each group adds a title line, spacing (12), and 16px vertical padding inside the box
@@ -483,6 +498,7 @@ enum NotchLayout {
     /// costs nothing.
     static func sessionsFitting(cardBudget: CGFloat, windowCount: Int,
                                 groupCount: Int = 2,
+                                workweekPaceWindowCount: Int = 0,
                                 hasTokenUsage: Bool = false,
                                 hasPlan: Bool = false,
                                 hasResetCredits: Bool = false) -> Int {
@@ -492,6 +508,7 @@ enum NotchLayout {
             // the nth row can never be what pushes the summary line off the
             // bottom of the card.
             let height = cardHeight(windowCount: windowCount, groupCount: groupCount,
+                                    workweekPaceWindowCount: workweekPaceWindowCount,
                                     sessionCount: n + 1, sessionCap: n,
                                     hasTokenUsage: hasTokenUsage, hasPlan: hasPlan,
                                     hasResetCredits: hasResetCredits)
@@ -515,10 +532,13 @@ enum NotchLayout {
     /// clicks through everywhere the chrome is not — but it cannot be so
     /// generous that the panel runs off the screen, which is what the cap is
     /// solved for.
-    static func maxCardHeight(sessionCap: Int, hasTokenUsage: Bool = false,
+    static func maxCardHeight(sessionCap: Int,
+                              workweekPaceWindowCount: Int = maxWindowCount,
+                              hasTokenUsage: Bool = false,
                               hasPlan: Bool = false,
                               hasResetCredits: Bool = false) -> CGFloat {
         cardHeight(windowCount: maxWindowCount, groupCount: 2,
+                   workweekPaceWindowCount: workweekPaceWindowCount,
                    sessionCount: sessionCap + 1, sessionCap: sessionCap,
                    hasTokenUsage: hasTokenUsage, hasPlan: hasPlan,
                    hasResetCredits: hasResetCredits)

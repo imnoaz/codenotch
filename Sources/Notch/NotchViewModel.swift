@@ -567,10 +567,21 @@ final class NotchViewModel: ObservableObject {
         snapshots.contains { $0.resetCredits != nil }
     }
 
+    /// The worst case across the actual stack, so the reserved height can
+    /// never fall short of what a real card with workweek pace bars needs —
+    /// mirrors how `hasTokenUsage`/`hasPlan`/`hasResetCredits` above budget
+    /// for "any snapshot might need this row".
+    private var maxWorkweekPaceWindowCount: Int {
+        snapshots.map { snapshot in
+            snapshot.windows.filter { WorkweekIdealUsage.isEligible($0, providerID: snapshot.providerID) }.count
+        }.max() ?? 0
+    }
+
     func sessionCap(cellCount: Int) -> Int {
         guard screenSize != .zero else { return NotchLayout.defaultSessionCap }
         return NotchLayout.sessionsFitting(cardBudget: cardBudget(cellCount: cellCount),
                                            windowCount: NotchLayout.maxWindowCount,
+                                           workweekPaceWindowCount: maxWorkweekPaceWindowCount,
                                            hasTokenUsage: hasTokenUsage,
                                            hasPlan: hasPlan,
                                            hasResetCredits: hasResetCredits)
@@ -581,6 +592,7 @@ final class NotchViewModel: ObservableObject {
             NotchLayout.cardHeight(windowCount: snapshot.windows.count,
                 groupCount: Set(snapshot.windows.compactMap(\.group)).count,
                 moneyWindowCount: snapshot.windows.filter { $0.money != nil }.count,
+                workweekPaceWindowCount: snapshot.windows.filter { WorkweekIdealUsage.isEligible($0, providerID: snapshot.providerID) }.count,
                 usageDetailGroupCount: snapshot.usageDetail?.visibleGroups.count ?? 0,
                 sessionCount: snapshot.localModel == nil ? sessionCap + 1 : 0,
                 sessionCap: sessionCap,
@@ -599,10 +611,29 @@ final class NotchViewModel: ObservableObject {
 
     func maxCardHeight(cellCount: Int) -> CGFloat {
         let cap = sessionCap(cellCount: cellCount)
-        return snapshots.isEmpty
-            ? NotchLayout.maxCardHeight(sessionCap: cap, hasTokenUsage: hasTokenUsage, hasPlan: hasPlan,
-                                        hasResetCredits: hasResetCredits)
-            : contentCardHeight(sessionCap: cap)
+        guard !snapshots.isEmpty else {
+            guard screenSize != .zero else {
+                // Nothing is known yet — no screen, no snapshots — so `cap`
+                // above already fell back to `NotchLayout.defaultSessionCap`
+                // without looking at `maxWorkweekPaceWindowCount` at all.
+                // This has to match that same "nothing is known" default
+                // (worst case, mirroring `defaultMaxCardHeight`) rather than
+                // the real (here, zero) window count, or the two figures
+                // this feeds — this one and the slack this app already sizes
+                // itself for before any provider has reported in — would
+                // disagree for no reason.
+                return NotchLayout.maxCardHeight(sessionCap: cap, hasTokenUsage: hasTokenUsage, hasPlan: hasPlan,
+                                                 hasResetCredits: hasResetCredits)
+            }
+            // The screen is known even though no snapshot has arrived yet:
+            // `cap` was solved against the real (here, zero)
+            // `maxWorkweekPaceWindowCount`, so this must use that same
+            // figure to stay consistent with the budget it was solved for.
+            return NotchLayout.maxCardHeight(sessionCap: cap, workweekPaceWindowCount: maxWorkweekPaceWindowCount,
+                                             hasTokenUsage: hasTokenUsage, hasPlan: hasPlan,
+                                             hasResetCredits: hasResetCredits)
+        }
+        return contentCardHeight(sessionCap: cap)
     }
 
     /// How tall the tallest card may be before the panel runs off the screen.

@@ -22796,6 +22796,53 @@
     },
     "Dashed weekly ring": {
       "extractionState": "manual"
+    },
+    "10-hour/day equivalent (5-day workweek)": {
+      "extractionState": "manual",
+      "localizations": {
+        "ru": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Эквивалент 10 часов в день (5-дневная рабочая неделя)"
+          }
+        },
+        "fr": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Équivalent 10 h/jour (semaine de 5 jours)"
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "10 Std./Tag entspricht (5-Tage-Woche)"
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "10時間/日換算（週5日稼働）"
+          }
+        },
+        "pt-BR": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Equivalente a 10 h/dia (semana de 5 dias)"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "相当于每天10小时（每周5天工作制）"
+          }
+        },
+        "uk": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Еквівалент 10 год/день (5-денний робочий тиждень)"
+          }
+        }
+      }
     }
   },
   "version": "1.0"
