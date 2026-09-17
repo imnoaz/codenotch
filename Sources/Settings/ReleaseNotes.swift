@@ -32,6 +32,16 @@ enum ReleaseNotes {
     static var all: [ReleaseNote] {
         [
             ReleaseNote(
+                version: "1.12.1",
+                headline: L10n.t("A workweek pace guide under Claude's weekly ring."),
+                changes: [
+                    ReleaseNote.Change(
+                        title: L10n.t("Two more bars under Claude's weekly limit"),
+                        detail: L10n.t("A pair of thin reference bars compares what you have actually used against a 10-hour-a-day, five-day workweek — one for right now, one for what today allows by midnight.")
+                    ),
+                ]
+            ),
+            ReleaseNote(
                 version: "1.12.0",
                 headline: L10n.t("An installer for Windows, Ukrainian, Dark glass, and limits you set yourself."),
                 changes: [

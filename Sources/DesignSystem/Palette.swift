@@ -27,6 +27,10 @@ enum Palette {
                                      light: .black.withAlphaComponent(0.15))
 
     static let ample         = Color(dark: NSColor(hex: 0x00FF88), light: NSColor(hex: 0x00A356))
+    /// The workweek ideal-usage reference bars: `ample`'s hue, dimmed so it
+    /// reads as a guideline sitting under the real usage bar rather than as a
+    /// second claim of the same weight.
+    static let workweekIdealBar = ample.opacity(0.55)
     static let watch         = Color(dark: NSColor(hex: 0xF2FF00), light: NSColor(hex: 0xB08800))
     /// Already 3.5:1 on white, so the warning colour is the same in both.
     static let critical      = Color(hex: 0xFF3F00)           // orange

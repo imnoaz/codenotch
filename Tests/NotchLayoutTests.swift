@@ -1150,12 +1150,20 @@ final class TooltipOverflowTests: XCTestCase {
 /// a desk display that can does not.
 final class SessionCapTests: XCTestCase {
     func testWhatFitsAlwaysFitsTheBudgetItWasSolvedFor() {
+        // `sessionsFitting` and `maxCardHeight` must be fed the *same*
+        // workweek-pace-window assumption to be comparable this way —
+        // `sessionsFitting` defaults that count to 0 (a caller normally
+        // supplies the real figure), while `maxCardHeight`'s own default is
+        // the worst case (every window eligible), since it is meant to stand
+        // in for "no particular snapshot" contexts. Passing `maxWindowCount`
+        // to both here keeps this an apples-to-apples worst-case check.
         for budget in stride(from: CGFloat(150), through: 1200, by: 37) {
             let n = NotchLayout.sessionsFitting(cardBudget: budget,
-                                                windowCount: NotchLayout.maxWindowCount)
+                                                windowCount: NotchLayout.maxWindowCount,
+                                                workweekPaceWindowCount: NotchLayout.maxWindowCount)
             guard n > 0 else { continue }
             XCTAssertLessThanOrEqual(
-                NotchLayout.maxCardHeight(sessionCap: n), budget,
+                NotchLayout.maxCardHeight(sessionCap: n, workweekPaceWindowCount: NotchLayout.maxWindowCount), budget,
                 "\(n) rows were admitted into \(budget)pt but do not fit"
             )
         }

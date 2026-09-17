@@ -368,6 +368,7 @@ private struct StatusRing: View {
 private struct LimitWindowRow: View {
     let window: LimitWindow
     var inset: CGFloat = 0
+    let providerID: String
     let fidelity: Fidelity
     let now: Date
     let resetTimeFormat: ResetTimeFormat
@@ -402,6 +403,35 @@ private struct LimitWindowRow: View {
         window.usedFraction == nil && (window.used != nil || window.detail != nil)
     }
 
+    /// Only Claude's `weekly_*` windows (`weekly_all`, `weekly_opus`, the
+    /// per-model ones, …) get the workweek reference bars, and only when a
+    /// reset date exists to anchor the week to.
+    private var isWorkweekPaceEligible: Bool {
+        WorkweekIdealUsage.isEligible(window, providerID: providerID)
+    }
+
+    /// `nil` when there is nothing to draw — no reset to anchor to, or the
+    /// computed share rounds to nothing — mirroring claude-period's
+    /// `createIdealBar` returning null for a non-positive percentage.
+    private func workweekIdealFraction(evalTime: Date) -> Double? {
+        guard let resetsAt = window.resetsAt else { return nil }
+        guard let fraction = WorkweekIdealUsage.idealFraction(resetsAt: resetsAt, evalTime: evalTime),
+              fraction > 0 else { return nil }
+        return fraction
+    }
+
+    /// A thin reference bar showing `fraction` of the same track the main
+    /// usage bar spans, in the dimmed `workweekIdealBar` colour so it reads
+    /// as a guideline rather than a second usage reading.
+    private func workweekIdealBar(fraction: Double) -> some View {
+        let fillWidth = max(NotchLayout.thinBarHeight, trackWidth * CGFloat(min(max(fraction, 0), 1)))
+        return ZStack(alignment: .leading) {
+            Capsule().fill(Palette.barTrack)
+            Capsule().fill(Palette.workweekIdealBar).frame(width: fillWidth)
+        }
+        .frame(width: trackWidth, height: NotchLayout.thinBarHeight)
+    }
+
     var body: some View {
         if let money = window.money {
             MoneyBreakdownView(title: window.label, money: money, fidelity: fidelity)
@@ -421,6 +451,30 @@ private struct LimitWindowRow: View {
                     }
                     .frame(width: trackWidth, height: NotchLayout.barHeight)
                     .padding(.top, NotchLayout.labelToBar)
+                }
+
+                if isWorkweekPaceEligible {
+                    // Computed once up front so the *second* bar's top gap is
+                    // still `barToThinBar` (not the tighter inter-bar
+                    // spacing) on the rare tick where the first bar rounds to
+                    // nothing but the end-of-day one does not.
+                    let todayFraction = workweekIdealFraction(evalTime: now)
+                    let endOfTodayFraction = workweekIdealFraction(evalTime: WorkweekIdealUsage.endOfToday(now: now))
+
+                    if let todayFraction {
+                        Text(L10n.t("10-hour/day equivalent (5-day workweek)"))
+                            .font(Typography.cardBody)
+                            .foregroundStyle(Palette.textSecondary)
+                            .lineLimit(1)
+                            .minimumScaleFactor(0.85)
+                            .padding(.top, NotchLayout.barToThinBar)
+                        workweekIdealBar(fraction: todayFraction)
+                            .padding(.top, NotchLayout.thinBarLabelToBar)
+                    }
+                    if let endOfTodayFraction {
+                        workweekIdealBar(fraction: endOfTodayFraction)
+                            .padding(.top, todayFraction == nil ? NotchLayout.barToThinBar : NotchLayout.thinBarSpacing)
+                    }
                 }
 
                 Text("\(window.usedFraction == nil ? "" : fidelity.qualifier)\(window.detail ?? window.summary)\(paceText)")
@@ -571,7 +625,7 @@ private struct ProviderTooltip: View {
 
                                 VStack(alignment: .leading, spacing: NotchLayout.blockSpacing) {
                                     ForEach(Array(group.windows.enumerated()), id: \.element.id) { windowIndex, window in
-                                        LimitWindowRow(window: window, inset: 2 * Design.px(16), fidelity: snapshot.fidelity, now: now, resetTimeFormat: resetTimeFormat, showsUsagePace: showUsagePace)
+                                        LimitWindowRow(window: window, inset: 2 * Design.px(16), providerID: snapshot.providerID, fidelity: snapshot.fidelity, now: now, resetTimeFormat: resetTimeFormat, showsUsagePace: showUsagePace)
                                             .padding(.top, windowIndex == 0 ? 0 : NotchLayout.blockSpacing)
                                     }
                                 }
@@ -584,7 +638,7 @@ private struct ProviderTooltip: View {
                             .padding(.top, groupIndex == 0 ? NotchLayout.headerToBlock : Design.px(28))
                         } else {
                             ForEach(Array(group.windows.enumerated()), id: \.element.id) { windowIndex, window in
-                                LimitWindowRow(window: window, fidelity: snapshot.fidelity, now: now, resetTimeFormat: resetTimeFormat, showsUsagePace: showUsagePace)
+                                LimitWindowRow(window: window, providerID: snapshot.providerID, fidelity: snapshot.fidelity, now: now, resetTimeFormat: resetTimeFormat, showsUsagePace: showUsagePace)
                                     .padding(.top, (groupIndex == 0 && windowIndex == 0) ? NotchLayout.headerToBlock : NotchLayout.blockSpacing)
                             }
                         }
@@ -1027,6 +1081,7 @@ struct TooltipCard: View {
             windowCount: snapshot.windows.count,
             groupCount: snapshot.windowGroupCount,
             moneyWindowCount: snapshot.windows.filter { $0.money != nil }.count,
+            workweekPaceWindowCount: snapshot.windows.filter { WorkweekIdealUsage.isEligible($0, providerID: snapshot.providerID) }.count,
             usageDetailGroupCount: snapshot.usageDetail?.visibleGroups.count ?? 0,
             sessionCount: snapshot.localModel == nil ? (activity?.sessions.count ?? 0) : 0,
             sessionCap: sessionCap,
