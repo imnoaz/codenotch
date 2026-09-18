@@ -410,6 +410,45 @@ private struct LimitWindowRow: View {
         WorkweekIdealUsage.isEligible(window, providerID: providerID)
     }
 
+    private var isClaude: Bool { ClaudeProfile.isClaude(providerID: providerID) }
+
+    /// The line under the bar for Claude: just what's left, not "12% Used ·
+    /// 88% left" — the bar itself already shows what's used, so the pair
+    /// doubled up on the one figure. Every other provider keeps both halves.
+    private var summaryText: String {
+        if let detail = window.detail { return detail }
+        guard isClaude, let usedFraction = window.usedFraction else { return window.summary }
+        let halves = Percent.halves(for: usedFraction)
+        return L10n.t("\(halves.left)% left")
+    }
+
+    /// Appended after `summaryText` for Claude's weekly windows: how far the
+    /// actual usage bar sits from today's ideal pace — the end-of-day
+    /// workweek reference bar drawn below. Red once usage has overtaken it.
+    private var todayRemainingText: Text {
+        guard isWorkweekPaceEligible,
+              let usedFraction = window.usedFraction,
+              let endOfTodayFraction = workweekIdealFraction(evalTime: WorkweekIdealUsage.endOfToday(now: now))
+        else { return Text("") }
+
+        let points = (endOfTodayFraction - usedFraction) * 100
+        let magnitude = abs(points)
+        let rounded = (magnitude * 10).rounded() / 10
+        // A negative sign in front of "<0.1" would claim a precision the
+        // number doesn't have ("-<0.1" reads as nonsense); the colour alone
+        // says which side of zero a magnitude this small landed on.
+        let value: String
+        if rounded == 0 && magnitude > 0 {
+            value = "<0.1"
+        } else {
+            let digits = String(format: "%.1f", locale: Locale(identifier: "en_US_POSIX"), rounded)
+                .replacingOccurrences(of: ".0", with: "")
+            value = points < 0 ? "-\(digits)" : digits
+        }
+        return Text(" · \(L10n.t("Today \(value)% left"))")
+            .foregroundColor(points < 0 ? .red : Palette.textSecondary)
+    }
+
     /// `nil` when there is nothing to draw — no reset to anchor to, or the
     /// computed share rounds to nothing — mirroring claude-period's
     /// `createIdealBar` returning null for a non-positive percentage.
@@ -477,7 +516,7 @@ private struct LimitWindowRow: View {
                     }
                 }
 
-                Text("\(window.usedFraction == nil ? "" : fidelity.qualifier)\(window.detail ?? window.summary)\(paceText)")
+                Text("\(window.usedFraction == nil ? "" : fidelity.qualifier)\(summaryText)\(todayRemainingText)\(paceText)")
                     .font(Typography.cardBody)
                     .foregroundStyle(Palette.textPrimary)
                     .lineLimit(1)
