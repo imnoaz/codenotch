@@ -12,33 +12,93 @@ struct CodexRolloutActivity {
         case success
     }
 
+    /// The state a rollout ends in, read from scratch.
     static func state(from url: URL) -> State? {
-        guard let data = try? Data(contentsOf: url),
-              let text = String(data: data, encoding: .utf8) else { return nil }
+        CodexRolloutReader().state(from: url)
+    }
+}
 
-        var state: State?
-        for line in text.split(whereSeparator: \.isNewline) {
-            guard let lineData = line.data(using: .utf8),
-                  let object = try? JSONSerialization.jsonObject(with: lineData),
-                  let record = object as? [String: Any],
-                  record["type"] as? String == "event_msg",
-                  let payload = record["payload"] as? [String: Any],
-                  let type = payload["type"] as? String else { continue }
+/// Reads a rollout's state incrementally.
+///
+/// The monitor asks every two seconds, and a long session's rollout runs to
+/// tens of megabytes. Reading and parsing all of it each time held the main
+/// thread for a large share of the app's idle CPU, to learn something that
+/// almost never changes. This keeps how far it has read and what it found, so a
+/// tick on an unchanged file costs a `stat` and a tick on a grown one parses
+/// only the new lines. The answer is the same as reading the whole file: only
+/// the last lifecycle event counts, and it is folded in as the file grows.
+final class CodexRolloutReader {
+    private static let markers = ["task_started", "task_complete", "turn_aborted"].map { Data($0.utf8) }
 
-            switch type {
-            case "task_started":
-                state = .busy
-            case "task_complete":
-                state = .success
-            case "turn_aborted":
-                // An aborted turn is not a successful completion. Returning
-                // nil lets the activity monitor drop it without announcing.
-                state = nil
-            default:
-                continue
-            }
+    private var url: URL?
+    /// Which file at `url` was read: a rollout replaced in place keeps its path
+    /// and may keep its size, but not its inode.
+    private var inode: UInt64 = 0
+    /// Bytes consumed up to and including the last newline seen.
+    private var offset: UInt64 = 0
+    /// The state after every complete line before `offset`.
+    private var state: CodexRolloutActivity.State?
+
+    func state(from url: URL) -> CodexRolloutActivity.State? {
+        guard let handle = try? FileHandle(forReadingFrom: url),
+              let size = try? handle.seekToEnd() else {
+            reset(to: nil, inode: 0)
+            return nil
         }
-        return state
+        defer { try? handle.close() }
+
+        var info = stat()
+        let id = fstat(handle.fileDescriptor, &info) == 0 ? UInt64(info.st_ino) : 0
+        // A different file, or one that shrank (rotated or rewritten), is not
+        // a continuation of what was read before.
+        if url != self.url || id != inode || size < offset { reset(to: url, inode: id) }
+        guard (try? handle.seek(toOffset: offset)) != nil,
+              let chunk = try? handle.readToEnd() else { return state }
+
+        var lines = chunk.split(separator: 0x0A, omittingEmptySubsequences: true)
+        // A last line with no newline after it may still be being written.
+        // It counts for this answer if it parses, but is read again next time
+        // rather than committed.
+        let unterminated = chunk.last != 0x0A ? lines.popLast() : nil
+        for line in lines { state = Self.apply(Data(line), to: state) }
+        offset += UInt64(chunk.count - (unterminated?.count ?? 0))
+        return unterminated.map { Self.apply(Data($0), to: state) } ?? state
+    }
+
+    private func reset(to url: URL?, inode: UInt64) {
+        self.url = url
+        self.inode = inode
+        offset = 0
+        state = nil
+    }
+
+    /// The state after one line. Lines that are not lifecycle events leave it
+    /// alone, and are rejected on a byte search before any JSON is parsed.
+    ///
+    /// The search looks for the event names as written, so a line that spells
+    /// one with a `\u` escape would be missed. Codex's JSON writer does not
+    /// escape `_`, and no byte search can be complete against a format that
+    /// allows every character to be escaped.
+    private static func apply(_ line: Data, to state: CodexRolloutActivity.State?) -> CodexRolloutActivity.State? {
+        guard markers.contains(where: { line.range(of: $0) != nil }),
+              let object = try? JSONSerialization.jsonObject(with: line),
+              let record = object as? [String: Any],
+              record["type"] as? String == "event_msg",
+              let payload = record["payload"] as? [String: Any],
+              let type = payload["type"] as? String else { return state }
+
+        switch type {
+        case "task_started":
+            return .busy
+        case "task_complete":
+            return .success
+        case "turn_aborted":
+            // An aborted turn is not a successful completion. Returning
+            // nil lets the activity monitor drop it without announcing.
+            return nil
+        default:
+            return state
+        }
     }
 }
 
@@ -67,6 +127,7 @@ final class CodexActivityMonitor: ObservableObject, AgentActivityMonitor {
     /// How long after the last write a turn is still considered in flight.
     private let staleAfter: TimeInterval
     private var timer: Timer?
+    private let rollouts = CodexRolloutReader()
 
     init(
         profile: CodexProfile = .default(),
@@ -98,14 +159,15 @@ final class CodexActivityMonitor: ObservableObject, AgentActivityMonitor {
 
     private func rescan() {
         let found = Self.read(stateStore: stateStore, desktopStore: desktopStore,
-                              staleAfter: staleAfter, profile: profile)
+                              staleAfter: staleAfter, profile: profile, rollouts: rollouts)
         guard found != sessions else { return }
         sessions = found
     }
 
     static func read(stateStore: URL, desktopStore: URL,
                      staleAfter: TimeInterval, now: Date = Date(),
-                     profile: CodexProfile = .default()) -> [AgentSession] {
+                     profile: CodexProfile = .default(),
+                     rollouts: CodexRolloutReader = CodexRolloutReader()) -> [AgentSession] {
         // Both surfaces, because "Codex" is two programs that record their work
         // in different places: the CLI and the VS Code extension append to a
         // rollout, and the desktop app writes to its own catalogue. Whichever
@@ -116,7 +178,7 @@ final class CodexActivityMonitor: ObservableObject, AgentActivityMonitor {
            let modified = (try? FileManager.default
                .attributesOfItem(atPath: rollout.path))?[.modificationDate] as? Date {
             let state: AgentSession.State
-            switch CodexRolloutActivity.state(from: rollout) {
+            switch rollouts.state(from: rollout) {
             case .success: state = .success
             case .busy, .none: state = .busy
             }

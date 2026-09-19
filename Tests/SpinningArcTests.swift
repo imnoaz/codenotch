@@ -71,3 +71,67 @@ final class SpinningArcTests: XCTestCase {
         XCTAssertNil(view.hitTest(NSPoint(x: view.bounds.midX, y: view.bounds.midY)))
     }
 }
+
+/// The blocked / finished ring pulses in Core Animation for the same reason
+/// the arc turns there: a SwiftUI `repeatForever` re-lays-out the hosting view
+/// on every frame.
+@MainActor
+final class PulsingRingTests: XCTestCase {
+    private func ringView(pulses: Bool = true, dimmed: Float = 0.3) -> PulsingRingView {
+        let side = NotchLayout.ringDiameter
+        let view = PulsingRingView(frame: NSRect(x: 0, y: 0, width: side, height: side))
+        let inset = (NotchLayout.ringDiameter - NotchLayout.activityDiameter) / 2
+        view.configure(color: .white, inset: inset, dimmedOpacity: dimmed, pulses: pulses)
+        view.layout()
+        return view
+    }
+
+    private func hosted(_ view: PulsingRingView) -> NSWindow {
+        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 80, height: 80),
+                              styleMask: .borderless, backing: .buffered, defer: true)
+        window.isReleasedWhenClosed = false
+        window.contentView?.addSubview(view)
+        return window
+    }
+
+    func testItDrawsTheWholeActivityCircle() {
+        let view = ringView()
+        XCTAssertEqual(view.ring.lineWidth, NotchLayout.activityStroke)
+        let box = view.ring.path?.boundingBoxOfPath ?? .zero
+        XCTAssertEqual(box.width, NotchLayout.activityDiameter, accuracy: 0.01)
+        XCTAssertEqual(box.midX, view.bounds.midX, accuracy: 0.01)
+    }
+
+    func testItFadesAndReturnsForeverOnScreen() throws {
+        let view = ringView(dimmed: 0.65)
+        let window = hosted(view)
+        defer { window.close() }
+
+        let fade = try XCTUnwrap(view.ring.animation(forKey: PulsingRingView.animationKey) as? CABasicAnimation)
+        XCTAssertEqual(fade.keyPath, "opacity")
+        XCTAssertEqual(fade.duration, 0.9)
+        XCTAssertTrue(fade.autoreverses)
+        XCTAssertEqual(fade.repeatCount, .infinity)
+        XCTAssertEqual((fade.toValue as? Float) ?? 0, 0.65, accuracy: 0.0001)
+    }
+
+    func testReduceMotionHoldsItStill() {
+        let view = ringView(pulses: false)
+        let window = hosted(view)
+        defer { window.close() }
+        XCTAssertNil(view.ring.animation(forKey: PulsingRingView.animationKey))
+    }
+
+    func testAnUnchangedUpdateDoesNotRestartThePulse() throws {
+        let view = ringView()
+        let window = hosted(view)
+        defer { window.close() }
+        let first = try XCTUnwrap(view.ring.animation(forKey: PulsingRingView.animationKey))
+        view.configure(color: .white, inset: 3, dimmedOpacity: 0.3, pulses: true)
+        XCTAssertTrue(first === view.ring.animation(forKey: PulsingRingView.animationKey))
+    }
+
+    func testItNeverTakesAClick() {
+        XCTAssertNil(ringView().hitTest(NSPoint(x: 5, y: 5)))
+    }
+}

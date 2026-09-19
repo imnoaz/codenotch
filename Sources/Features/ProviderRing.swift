@@ -194,8 +194,6 @@ private struct ActivityArc: View {
 
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @Environment(\.codenotchReduceTransparency) private var reduceTransparency
-    @State private var pulsing = false
-
     /// How much of the circle the moving arc covers.
     private let arcFraction: CGFloat = 0.25
 
@@ -236,18 +234,17 @@ private struct ActivityArc: View {
         )
     }
 
+    /// Pulsed by Core Animation, for the same reason `spinner` is: a
+    /// `repeatForever` opacity animation re-runs the hosting view's layout on
+    /// every frame, and a session left waiting on you is on screen for as long
+    /// as you leave it — measured at about half of the app's idle CPU.
     private var pulse: some View {
-        Circle()
-            .inset(by: inset)
-            .stroke(summary.color, lineWidth: NotchLayout.activityStroke)
-            .opacity(pulsing ? (reduceTransparency ? 0.65 : 0.3) : 1)
-            .onAppear {
-                guard !reduceMotion else { return }
-                withAnimation(.easeInOut(duration: 0.9).repeatForever(autoreverses: true)) {
-                    pulsing = true
-                }
-            }
-            .onDisappear { pulsing = false }
+        PulsingRing(
+            color: summary.color,
+            inset: inset,
+            dimmedOpacity: reduceTransparency ? 0.65 : 0.3,
+            pulses: !reduceMotion
+        )
     }
 }
 
@@ -436,5 +433,117 @@ final class SpinningArcView: NSView {
         turn.repeatCount = .infinity
         turn.isRemovedOnCompletion = false
         arc.add(turn, forKey: Self.animationKey)
+    }
+}
+
+/// The blocked / finished indicator as a shape layer: the whole activity
+/// circle, fading to `dimmedOpacity` and back every 0.9 seconds.
+private struct PulsingRing: NSViewRepresentable {
+    let color: Color
+    let inset: CGFloat
+    let dimmedOpacity: Float
+    let pulses: Bool
+
+    func makeNSView(context: Context) -> PulsingRingView { PulsingRingView() }
+
+    func updateNSView(_ view: PulsingRingView, context: Context) {
+        view.configure(color: NSColor(color), inset: inset,
+                       dimmedOpacity: dimmedOpacity, pulses: pulses)
+    }
+}
+
+final class PulsingRingView: NSView {
+    static let pulseDuration: CFTimeInterval = 0.9
+    static let animationKey = "pulse"
+
+    let ring = CAShapeLayer()
+    private var color: NSColor = .white
+    private var inset: CGFloat = 0
+    private var dimmedOpacity: Float = 0.3
+    private var pulses = true
+
+    override init(frame: NSRect) {
+        super.init(frame: frame)
+        wantsLayer = true
+        ring.fillColor = nil
+        ring.lineWidth = NotchLayout.activityStroke
+        layer?.addSublayer(ring)
+    }
+
+    required init?(coder: NSCoder) { fatalError("init(coder:) is not used") }
+
+    /// Decoration only: clicks belong to the ring and the notch beneath it.
+    override func hitTest(_ point: NSPoint) -> NSView? { nil }
+
+    func configure(color: NSColor, inset: CGFloat, dimmedOpacity: Float, pulses: Bool) {
+        // SwiftUI calls this on every update; restarting the pulse each time
+        // would reset its phase, so the animation is replaced only when what
+        // it was built from has changed.
+        let retime = dimmedOpacity != self.dimmedOpacity
+        CATransaction.begin()
+        CATransaction.setDisableActions(true)
+        self.color = color
+        self.inset = inset
+        self.dimmedOpacity = dimmedOpacity
+        self.pulses = pulses
+        applyColor()
+        rebuildPath()
+        CATransaction.commit()
+        if retime { ring.removeAnimation(forKey: Self.animationKey) }
+        updateAnimation()
+    }
+
+    override func layout() {
+        super.layout()
+        CATransaction.begin()
+        CATransaction.setDisableActions(true)
+        rebuildPath()
+        CATransaction.commit()
+        // Layout runs again when a hidden panel comes back, which
+        // `viewDidMoveToWindow` does not: the window never changed.
+        updateAnimation()
+    }
+
+    override func viewDidMoveToWindow() {
+        super.viewDidMoveToWindow()
+        updateAnimation()
+    }
+
+    override func viewDidChangeEffectiveAppearance() {
+        super.viewDidChangeEffectiveAppearance()
+        applyColor()
+    }
+
+    private func applyColor() {
+        effectiveAppearance.performAsCurrentDrawingAppearance {
+            ring.strokeColor = color.cgColor
+        }
+    }
+
+    private func rebuildPath() {
+        ring.frame = bounds
+        let radius = max(0, min(bounds.width, bounds.height) / 2 - inset)
+        ring.path = CGPath(ellipseIn: CGRect(x: bounds.midX - radius, y: bounds.midY - radius,
+                                             width: radius * 2, height: radius * 2),
+                           transform: nil)
+    }
+
+    /// Re-added whenever it has gone missing: AppKit drops layer animations
+    /// when a window leaves the screen, and the notch's panel does.
+    private func updateAnimation() {
+        guard pulses, window != nil else {
+            ring.removeAnimation(forKey: Self.animationKey)
+            return
+        }
+        guard ring.animation(forKey: Self.animationKey) == nil else { return }
+        let fade = CABasicAnimation(keyPath: "opacity")
+        fade.fromValue = 1
+        fade.toValue = dimmedOpacity
+        fade.duration = Self.pulseDuration
+        fade.autoreverses = true
+        fade.repeatCount = .infinity
+        fade.timingFunction = CAMediaTimingFunction(name: .easeInEaseOut)
+        fade.isRemovedOnCompletion = false
+        ring.add(fade, forKey: Self.animationKey)
     }
 }
