@@ -167,7 +167,7 @@ private struct PeakWindowRow: View {
                 Button(role: .destructive, action: onRemove) {
                     Image(systemName: "minus.circle")
                 }
-                .buttonStyle(.borderless)
+                .buttonStyle(SettingsIconButtonStyle())
                 .help(L10n.t("Remove peak window"))
             }
         }

@@ -213,6 +213,87 @@ final class MiniMaxUsageTests: XCTestCase {
         }
     }
 
+    /// A percent nobody can read as a *number* is not a reading, whatever else
+    /// the lane says. `Double("-inf")` parses, and `max(0, (100 - it) / 100)`
+    /// is not a finiteness check: `max` answers its first argument when the
+    /// comparison is false, so `-inf` escapes it as a `+inf` fraction while
+    /// `NaN` is swallowed by that same ordering by accident. Either way the
+    /// fraction that reaches `Percent.text`/`Percent.halves` is not one — and
+    /// `Int(_: Double)` aborts the process on the non-finite one instead of
+    /// printing a ring. Hence a failed read, not a window.
+    func testNonFinitePercentsAreNotReadings() {
+        for json in [
+            // The string spelling `Double(_:)` accepts where the body named
+            // neither infinity, and the one that gets past the clamp today.
+            #"{"model_remains":[{"model_name":"general","current_interval_remaining_percent":"-inf"}]}"#,
+            // `JSONSerialization` parses `-1e400` to an `NSNumber` carrying
+            // -infinity rather than refusing it, where `1e400` parses to nil —
+            // so the numeric spelling reaches the same fraction.
+            #"{"model_remains":[{"model_name":"general","current_interval_remaining_percent":-1e400}]}"#,
+            // The weekly lane reads its own field through the same helper.
+            #"{"model_remains":[{"model_name":"general","current_weekly_remaining_percent":"nan"}]}"#,
+        ] {
+            XCTAssertThrowsError(try parse(json)) { error in
+                guard case UsageProviderError.nothingMetered = error else {
+                    return XCTFail("expected nothingMetered for \(json), got \(error)")
+                }
+            }
+        }
+    }
+
+    /// The counts come through `int(_:)` instead, where a value a string can
+    /// spell but an `Int` cannot hold is the same kind of trap: `Int("1e30")`
+    /// fails, `Double("1e30")` succeeds, and `Int(_: Double)` then aborts the
+    /// process rather than answering. A lane whose counts cannot be read
+    /// meters nothing; the abort is reached from the payload, not from a test.
+    func testACountTooLargeForAnIntIsNotAReading() {
+        let json = """
+        { "model_remains": [
+            { "model_name": "general",
+              "current_interval_total_count": "1e30",
+              "current_interval_usage_count": "250" } ] }
+        """
+        XCTAssertThrowsError(try parse(json)) { error in
+            guard case UsageProviderError.nothingMetered = error else {
+                return XCTFail("expected nothingMetered, got \(error)")
+            }
+        }
+    }
+
+    /// The same trap by the other spelling, which the string bound does not
+    /// cover. `JSONSerialization` hands `-1e400` back as an `NSNumber` carrying
+    /// -infinity, and `NSNumber.intValue` saturates it to `Int.min` rather than
+    /// aborting — so the read *succeeds* with a count nobody can represent, and
+    /// `max(0, total - remaining)` then traps on the overflow instead. Verified
+    /// against Foundation: `intValue` really is `Int.min` here.
+    func testACountThatSaturatesAnIntIsNotAReading() {
+        let json = """
+        { "model_remains": [
+            { "model_name": "general",
+              "current_interval_total_count": 1000,
+              "current_interval_usage_count": -1e400 } ] }
+        """
+        XCTAssertThrowsError(try parse(json)) { error in
+            guard case UsageProviderError.nothingMetered = error else {
+                return XCTFail("expected nothingMetered, got \(error)")
+            }
+        }
+    }
+
+    /// The other side of the guard, which no earlier test pins: every percent
+    /// fixture above spells its number as a JSON number, so the *string* path
+    /// is the one just narrowed and nothing else here would notice if it started
+    /// refusing finite values too. A decimal string is still a reading.
+    func testAFiniteStringSpellingIsStillAReading() throws {
+        let json = """
+        { "model_remains": [
+            { "model_name": "general",
+              "current_interval_remaining_percent": "12.5" } ] }
+        """
+        let session = try XCTUnwrap(try parse(json).windows.first)
+        XCTAssertEqual(session.usedFraction ?? -1, 0.875, accuracy: 0.0001)
+    }
+
     /// No `end_time` — the countdown is `now + remains_time / 1000`. Values
     /// under 1e6 are still milliseconds: 240000 ms is four minutes, not 66h.
     func testRemainsTimeIsMillisecondsEvenBelowOneMillion() throws {

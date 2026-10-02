@@ -32,11 +32,18 @@ final class NotchPanel: NSPanel {
         NSMenu.popUpContextMenu(menu, with: event, for: view)
     }
 
+    /// Whether a press at this point, in the window's own coordinates, is on
+    /// something that carries the notch without ⌥ — the grip beside the
+    /// settings button.
+    var startsDrag: ((CGPoint) -> Bool)?
+
     override func mouseDown(with event: NSEvent) {
         guard let view = contentView, view.hitTest(event.locationInWindow) != nil else {
             return super.mouseDown(with: event)
         }
-        guard event.modifierFlags.contains(.option), onDrag != nil else {
+        let carries = event.modifierFlags.contains(.option)
+            || startsDrag?(event.locationInWindow) == true
+        guard carries, onDrag != nil else {
             onClick?(event.locationInWindow)
             return
         }

@@ -21,7 +21,23 @@ struct ClaudeSessionRecord {
     /// not have. That is the flag that sends the monitor to the transcript
     /// instead — see `ClaudeTranscript`.
     let reportsStatus: Bool
+    /// How the session was started: `cli`, `claude-desktop`, `claude-vscode`…
+    let entrypoint: String?
+    /// The id the Claude desktop app knows this session by, present only on the
+    /// sessions it hosts. It is what names the app's own record of the session,
+    /// and that record is filed under the account uuid — which is the only way
+    /// to tell which account a desktop session belongs to. See
+    /// `ClaudeDesktopSessionIndex`.
+    let hostSessionID: String?
     let session: AgentSession
+
+    /// Whether the Claude desktop app is what started this session.
+    ///
+    /// `claude-desktop-3p` is the same app hosting a third-party agent; both
+    /// carry a `hostSessionId` and both are filed by the app under an account.
+    var isDesktopHosted: Bool {
+        entrypoint == "claude-desktop" || entrypoint == "claude-desktop-3p"
+    }
 
     /// Decoded leniently on purpose: the file is written by another program on
     /// its own release schedule, and an unknown field must never cost us a
@@ -47,10 +63,14 @@ struct ClaudeSessionRecord {
         let millis = (json["statusUpdatedAt"] as? NSNumber)?.doubleValue
             ?? (json["updatedAt"] as? NSNumber)?.doubleValue
 
+        let entrypoint = json["entrypoint"] as? String
+
         self.pid = pid
         self.sessionID = json["sessionId"] as? String
         self.cwd = cwd
         self.reportsStatus = reportsStatus
+        self.entrypoint = entrypoint
+        self.hostSessionID = json["hostSessionId"] as? String
         if let started = (json["startedAt"] as? NSNumber)?.doubleValue {
             self.startedAt = Date(timeIntervalSince1970: started / 1000)
         } else {
@@ -61,7 +81,7 @@ struct ClaudeSessionRecord {
         self.session = AgentSession(
             id: "claude.\(pid)",
             name: (json["name"] as? String) ?? folder,
-            detail: "\(Self.surface(json["entrypoint"] as? String)) · \(folder)",
+            detail: "\(Self.surface(entrypoint)) · \(folder)",
             state: state,
             waitingFor: (json["waitingFor"] as? String) ?? (json["needs"] as? String),
             // `startedAt` before the clock, because a desktop record carries

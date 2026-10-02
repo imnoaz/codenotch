@@ -281,17 +281,6 @@ final class PreferencesMigrationTests: XCTestCase {
         XCTAssertEqual(Preferences(defaults: UserDefaults(suiteName: name)!).weeklyRing, .outside)
     }
 
-    /// On by default — it is how the notch is carried to another edge — and
-    /// once somebody hides it, it has to stay hidden across a relaunch.
-    func testTheMoveHandleShowsUntilHiddenAndStaysHidden() {
-        let (fresh, name) = makeDefaults()
-        XCTAssertTrue(Preferences(defaults: fresh).showsMoveHandle)
-
-        Preferences(defaults: fresh).showsMoveHandle = false
-
-        XCTAssertFalse(Preferences(defaults: UserDefaults(suiteName: name)!).showsMoveHandle)
-    }
-
     /// The size has to outlive the launch that chose it, or it reads as a
     /// setting that did not take.
     func testTheNotchSizeSurvivesARelaunch() {
@@ -393,5 +382,171 @@ final class NotchPositionPersistenceTests: XCTestCase {
         for (index, edge) in NotchEdge.allCases.enumerated() {
             XCTAssertEqual(reopened.offset(for: edge), CGFloat(index * 150 - 225))
         }
+    }
+}
+
+/// Limits in the menu bar: off until asked for, remembered once chosen, and
+/// never mixed up with which providers are read.
+@MainActor
+final class MenuBarLimitsPreferenceTests: XCTestCase {
+    private func makeDefaults() throws -> (UserDefaults, String) {
+        let name = "MenuBarLimitsPreferenceTests.\(UUID().uuidString)"
+        return (try XCTUnwrap(UserDefaults(suiteName: name)), name)
+    }
+
+    private func reopen(_ name: String) throws -> Preferences {
+        Preferences(defaults: try XCTUnwrap(UserDefaults(suiteName: name)))
+    }
+
+    /// A fresh install and an upgrade from a version that never had the
+    /// switch both keep the icon — an update must not swap it for a readout.
+    func testAFreshInstallAndAnUpgradeBothKeepTheIcon() throws {
+        let (fresh, freshName) = try makeDefaults()
+        defer { fresh.removePersistentDomain(forName: freshName) }
+        XCTAssertEqual(Preferences(defaults: fresh).menuBarLimits, .off)
+
+        let (upgraded, name) = try makeDefaults()
+        defer { upgraded.removePersistentDomain(forName: name) }
+        upgraded.set(true, forKey: "hasLaunchedBefore")
+        upgraded.set(AppPresence.menuBar.rawValue, forKey: "appPresence")
+        let preferences = Preferences(defaults: upgraded)
+        XCTAssertFalse(preferences.showsLimitsInMenuBar)
+        XCTAssertFalse(preferences.showsWeeklyLimitInMenuBar)
+        XCTAssertNil(preferences.menuBarProviders, "never chosen, not chosen as none")
+    }
+
+    func testTheChoiceSurvivesARelaunch() throws {
+        let (defaults, name) = try makeDefaults()
+        defer { defaults.removePersistentDomain(forName: name) }
+        let preferences = Preferences(defaults: defaults)
+        preferences.showsLimitsInMenuBar = true
+        preferences.showsWeeklyLimitInMenuBar = true
+        preferences.setInMenuBar(false, for: "claude", among: ["claude", "codex"])
+
+        let reopened = try reopen(name)
+        XCTAssertTrue(reopened.showsLimitsInMenuBar)
+        XCTAssertTrue(reopened.showsWeeklyLimitInMenuBar)
+        XCTAssertEqual(reopened.menuBarProviders, ["codex"])
+        XCTAssertFalse(reopened.isInMenuBar("claude"))
+        XCTAssertTrue(reopened.isInMenuBar("codex"))
+    }
+
+    /// None is a choice, and it is still none after a relaunch — not the
+    /// default coming back.
+    func testChoosingNoneSurvivesARelaunchAsNone() throws {
+        let (defaults, name) = try makeDefaults()
+        defer { defaults.removePersistentDomain(forName: name) }
+        let preferences = Preferences(defaults: defaults)
+        preferences.showsLimitsInMenuBar = true
+        preferences.setInMenuBar(false, for: "claude", among: ["claude", "codex"])
+        preferences.setInMenuBar(false, for: "codex", among: ["claude", "codex"])
+
+        let reopened = try reopen(name)
+        XCTAssertEqual(reopened.menuBarProviders, [])
+        XCTAssertFalse(reopened.isInMenuBar("claude"))
+        XCTAssertFalse(reopened.isInMenuBar("codex"))
+    }
+
+    /// Off keeps the choice, across a relaunch too, so on again brings back
+    /// the same providers.
+    func testSwitchingOffKeepsTheChoice() throws {
+        let (defaults, name) = try makeDefaults()
+        defer { defaults.removePersistentDomain(forName: name) }
+        let preferences = Preferences(defaults: defaults)
+        preferences.showsLimitsInMenuBar = true
+        preferences.setInMenuBar(true, for: "gemini", among: ["claude", "codex", "gemini"])
+        preferences.setInMenuBar(false, for: "codex", among: ["claude", "codex", "gemini"])
+        preferences.showsLimitsInMenuBar = false
+
+        let reopened = try reopen(name)
+        XCTAssertFalse(reopened.showsLimitsInMenuBar)
+        reopened.showsLimitsInMenuBar = true
+        XCTAssertEqual(reopened.menuBarLimits, MenuBarLimits(isOn: true, chosen: ["claude", "gemini"]))
+    }
+
+    /// The menu bar choice and the connection are two switches: taking Claude
+    /// out of the bar leaves it read, and switching Codex off leaves its place
+    /// in the bar waiting for it.
+    func testTheMenuBarNeverTouchesWhatIsRead() throws {
+        let (defaults, name) = try makeDefaults()
+        defer { defaults.removePersistentDomain(forName: name) }
+        let preferences = Preferences(defaults: defaults)
+        preferences.reconcile(discoveredIDs: ["claude", "codex", "gemini"])
+        let read = preferences.connectedProviders
+
+        preferences.showsLimitsInMenuBar = true
+        preferences.setInMenuBar(false, for: "claude", among: ["claude", "codex"])
+        XCTAssertTrue(preferences.isConnected("claude"), "out of the bar, still read")
+        XCTAssertEqual(preferences.connectedProviders, read)
+
+        preferences.setConnected(false, for: "codex")
+        XCTAssertTrue(preferences.isInMenuBar("codex"), "not read today, still chosen for when it is")
+        preferences.setInMenuBar(true, for: "gemini", among: ["codex", "gemini"])
+        XCTAssertFalse(preferences.isConnected("gemini"), "choosing it for the bar does not start reading it")
+
+        let reopened = try reopen(name)
+        XCTAssertTrue(reopened.isConnected("claude"))
+        XCTAssertFalse(reopened.isConnected("codex"))
+        XCTAssertEqual(reopened.menuBarProviders, ["codex", "gemini"])
+    }
+}
+
+/// One channel for every notification. The notch is the default because it
+/// is what every earlier version did; the choice has to survive a relaunch.
+@MainActor
+final class NotificationChannelPreferenceTests: XCTestCase {
+    private func makeDefaults() -> UserDefaults {
+        let name = "PreferencesTests.channel.\(UUID().uuidString)"
+        let defaults = UserDefaults(suiteName: name)!
+        defaults.removePersistentDomain(forName: name)
+        return defaults
+    }
+
+    func testTheNotchIsTheDefault() {
+        XCTAssertEqual(Preferences(defaults: makeDefaults()).notificationChannel, .notch)
+    }
+
+    func testTheChoiceIsKept() {
+        let defaults = makeDefaults()
+        Preferences(defaults: defaults).notificationChannel = .mac
+        XCTAssertEqual(Preferences(defaults: defaults).notificationChannel, .mac)
+    }
+
+    func testEveryChannelExplainsItself() {
+        for channel in NotificationChannel.allCases {
+            XCTAssertFalse(channel.title.isEmpty)
+            XCTAssertFalse(channel.explanation.isEmpty)
+        }
+    }
+}
+
+/// How small the notch may be made.
+final class NotchScaleRangeTests: XCTestCase {
+    /// The floor was 0.75, set there because the percentage under each ring
+    /// stopped being readable below it. That reading is its own setting now,
+    /// so the floor no longer has to protect type that can be switched off.
+    func testTheSliderReachesHalfSize() {
+        XCTAssertEqual(Preferences.customScaleRange.lowerBound, 0.5, accuracy: 0.0001)
+        XCTAssertEqual(Preferences.customScaleRange.upperBound, 1.5, accuracy: 0.0001)
+    }
+
+    /// The presets stay inside it, or a preset would be unreachable by slider.
+    func testEveryPresetIsInsideTheSliderRange() {
+        for size in NotchSize.allCases {
+            XCTAssertTrue(Preferences.customScaleRange.contains(Double(size.scale)),
+                          "\(size.rawValue) at \(size.scale) is outside the slider's range")
+        }
+    }
+
+    /// And a half-size notch is still a target you can hit: the wake band has
+    /// a floor of its own, so the pill does not shrink out of reach with it.
+    @MainActor
+    func testAHalfSizeNotchIsStillReachable() {
+        let m = NotchViewModel()
+        m.edge = .right
+        m.sizeScale = 0.5
+        XCTAssertGreaterThanOrEqual(m.wakeDepth, NotchLayout.pillHotZone,
+                                    "the hot zone shrank with the notch")
+        XCTAssertGreaterThanOrEqual(m.wakeLength, NotchLayout.pillHotZone)
     }
 }

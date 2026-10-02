@@ -31,7 +31,7 @@ actor ClaudeOAuthProvider: UsageProvider {
     /// This profile's token, behind its own cache — see `ClaudeKeychain`.
     nonisolated private let keychain: ClaudeKeychain
 
-    private let endpoint = URL(string: "https://api.anthropic.com/api/oauth/usage")!
+    private let endpoint = URL(string: "https://api.anthropic.com/api/oauth/usage?cedar_ember=1")!
     private let session: URLSession
     /// Held between refreshes so the keychain is read once per token, not once
     /// per minute — a keychain read can put a prompt in front of the user.
@@ -80,44 +80,78 @@ actor ClaudeOAuthProvider: UsageProvider {
     /// re-shows the last good reading, undimmed for its own fifteen minutes and
     /// dimmed and dated after that. Nothing here has to re-implement any of it.
     private let desktopFreshness: TimeInterval
+    /// What a `.live` fetch will accept instead.
+    ///
+    /// Two minutes, from the same measurement that set the thirty: the session
+    /// window moved eleven points in fifteen minutes, so a cache that old is
+    /// most of a point out — fine for a ring nobody is watching, and not fine
+    /// for the one being watched while it climbs. Desktop rewrites the entry
+    /// every five to fifteen minutes, so past two minutes this simply drops
+    /// through to the CLI and the endpoint, which can answer for right now.
+    private let liveDesktopFreshness: TimeInterval
     /// Stamped whenever a Desktop read came up short. Without it, a machine with
     /// no Claude Desktop — or one whose Desktop has gone quiet — pays for a scan
-    /// of a few thousand directory entries on every 60s tick, forever. The same
+    /// of a few thousand directory entries on every poll, forever. The same
     /// reason `lastCLIAttempt` exists. A working source never sees this: every
     /// successful read scans (the scan is cheap and always accurate; see
     /// `ClaudeDesktopUsageCache.read`), and only a miss ever sets it.
     private var lastDesktopMiss: Date?
+
+    /// Suppresses the next few cache walks. Separate from the read itself
+    /// because the caller, not the reader, decides whether a reading it got
+    /// back is usable.
+    private func noteDesktopMiss(at now: Date) { lastDesktopMiss = now }
     /// How long a miss suppresses the next scan.
     private let desktopRescanInterval: TimeInterval
 
     /// A subprocess is far more expensive than an HTTP call, and `UsageStore`
-    /// polls every 60s while a session is busy. The windows barely move in a
-    /// minute, so the last answer is reused in between.
+    /// polls twice a minute while a session is busy. The windows barely move in
+    /// a minute, so the last answer is reused in between.
     private let cliRefreshInterval: TimeInterval
+    /// What a `.live` fetch will reuse instead.
+    ///
+    /// Still an interval, not zero: a run of ticks inside one busy minute must
+    /// not each spawn their own `claude`. Ninety seconds is one subprocess per
+    /// poll-and-a-half while a session is running, and nothing at all while it
+    /// is not — `UsageStore` only asks for `.live` when the number is moving or
+    /// somebody is looking at it.
+    private let liveCLIRefreshInterval: TimeInterval
     private var lastCLIWindows: (windows: [LimitWindow], at: Date)?
     /// The named tier the last `/usage` print named, if it named one.
     private var lastCLIPlan: String?
-    /// Stamped on every spawn, successful or not. Without it a Claude Code that
-    /// is installed but signed out costs a process on every tick, forever.
-    private var lastCLIAttempt: Date?
+    /// Stamped when Claude Code fails with `needsAuth` (signed out). Without it,
+    /// a Claude Code that is installed but signed out costs a process on every tick,
+    /// forever. Transient failures do not set this so a momentary blip can retry
+    /// on the next tick without locking out the CLI for five minutes.
+    private var lastCLIFailure: Date?
 
+    /// `displayName` is injected only so a set of profiles can be named
+    /// together: two accounts on one provider derive the same name from their
+    /// addresses, and only the caller holding all of them can see the clash.
+    /// Nil is the profile's own answer, which is what every other caller wants.
+    /// See `ClaudeProfile.displayNames(for:)`.
     init(profile: ClaudeProfile = .default(),
+         displayName: String? = nil,
          session: URLSession = .shared,
          archive: UsageArchive = UsageArchive(),
          loadCredentials: (@Sendable () throws -> ClaudeCredentials)? = nil,
          cli: ClaudeUsageCLI? = ClaudeUsageCLI.locate(),
          cliRefreshInterval: TimeInterval = 5 * 60,
+         liveCLIRefreshInterval: TimeInterval = 90,
          desktopCache: ClaudeDesktopUsageCache? = ClaudeDesktopUsageCache(),
          desktopFreshness: TimeInterval = 30 * 60,
+         liveDesktopFreshness: TimeInterval = 2 * 60,
          desktopRescanInterval: TimeInterval = 5 * 60) {
         self.cli = cli
         self.cliRefreshInterval = cliRefreshInterval
+        self.liveCLIRefreshInterval = liveCLIRefreshInterval
         self.desktopCache = desktopCache
         self.desktopFreshness = desktopFreshness
+        self.liveDesktopFreshness = liveDesktopFreshness
         self.desktopRescanInterval = desktopRescanInterval
         self.profile = profile
         self.id = profile.id
-        self.displayName = profile.displayName
+        self.displayName = displayName ?? profile.displayName
         let keychain = ClaudeKeychain(profile: profile)
         self.keychain = keychain
         self.loadCredentials = loadCredentials ?? { try keychain.load() }
@@ -130,13 +164,15 @@ actor ClaudeOAuthProvider: UsageProvider {
 
     /// How close to expiry a back-off counts as already expired.
     ///
-    /// The server hands back a 60s hint and `UsageStore` also ticks every 60s,
-    /// so the two run at the same period and the tick lands a few milliseconds
-    /// *before* the window opens — `retryAfter: 0.015` in the log. Refusing
-    /// that costs far more than the 15ms it saves: the caller is a timer, not a
-    /// retry loop, so the next attempt is not a moment later but a whole
-    /// refresh interval later. A 60s penalty silently becomes 120s and every
-    /// other tick is spent on nothing.
+    /// The server hands back a 60s hint, and when `UsageStore` polled on the
+    /// same 60s period the two ran in step: the poll landed a few milliseconds
+    /// *before* the window opened — `retryAfter: 0.015` in the log. Refusing
+    /// that costs far more than the 15ms it saves, because the caller is a
+    /// timer, not a retry loop: the next attempt is not a moment later but a
+    /// whole interval later, so a 60s penalty silently became 120s. The busy
+    /// interval is now half the hint rather than equal to it, which makes the
+    /// exact collision rarer without making the arithmetic any less true — a
+    /// penalty that expires just after a poll still waits out the next one.
     private let backoffSlack: TimeInterval = 1
 
     /// Pure, so the resonance this exists to break can be tested without a
@@ -148,19 +184,121 @@ actor ClaudeOAuthProvider: UsageProvider {
     }
 
     func fetchSnapshot() async throws -> ProviderSnapshot {
+        try await fetchSnapshot(freshness: .standard)
+    }
+
+    /// Freshness reaches the two allowances below, and nothing else. The
+    /// endpoint keeps its own back-off untouched: this is about not *serving* a
+    /// reading that was already old, never about asking Anthropic more often
+    /// than the 429 it hands back says we may.
+    func fetchSnapshot(freshness: UsageFreshness) async throws -> ProviderSnapshot {
+        let desktopAllowance: TimeInterval
+        let cliAllowance: TimeInterval
+        switch freshness {
+        case .standard:
+            desktopAllowance = desktopFreshness
+            cliAllowance = cliRefreshInterval
+        case .live:
+            desktopAllowance = min(liveDesktopFreshness, desktopFreshness)
+            cliAllowance = min(liveCLIRefreshInterval, cliRefreshInterval)
+        case .fromSource:
+            // Zero, which no reading can be inside: whatever is held is skipped,
+            // however new. A cache written two seconds ago *is* the account's
+            // number, so this spends a request to be told what it already knew —
+            // deliberately, because somebody asked for the source itself. The
+            // spacing that keeps that affordable is the caller's; see
+            // `UsageStore.refreshBecauseSomeoneIsLooking`.
+            desktopAllowance = 0
+            cliAllowance = 0
+        }
+        // A Deny is honoured by every source, not only the keychain (#98).
+        // Claude Desktop's cache and the CLI never needed this app's keychain
+        // access, which is exactly why they used to keep the ring filled after
+        // someone said no to it.
+        if keychain.isRefused {
+            throw UsageProviderError.accessDenied
+        }
+        // "Allow access…" was clicked: go straight to the keychain, so the
+        // dialogue the person asked for is the thing that answers — a cached
+        // or CLI reading would satisfy the refresh and the question would
+        // never be put.
+        if keychain.isAskingAgain {
+            return try await fetchFromKeychain()
+        }
         // Ahead of both the CLI and the back-off check. This is the cheapest
         // source and the only one that can never interrupt anyone: it reads a
         // file Claude Desktop has already written.
-        if let windows = await desktopWindows() {
-            return snapshot(windows: windows)
+        let desktop = await desktopReading()
+        let now = Date()
+        let resets = desktop?.resets?.credits(at: now)
+        // Whether this reading would ever be shown, at any freshness — which is
+        // a different question from whether it may be shown *now*, and the two
+        // must not be conflated. Conflating them made a caller that asked to
+        // skip the cache count as a cache miss, which armed the rescan throttle
+        // and stopped the cache being read at all for the next five minutes.
+        let showable = desktop.map {
+            $0.isFresh(at: now, within: desktopFreshness)
+                && !Self.hasExpiredWindow($0.windows, at: now)
+        } ?? false
+        if let desktop, showable, desktop.isFresh(at: now, within: desktopAllowance) {
+            // The cache carries no plan, so the reading would say nothing about
+            // whose it is — the one thing worth knowing when two Claude rings
+            // sit side by side.
+            return snapshot(windows: desktop.windows, plan: profile.organizationPlan(),
+                            resetCredits: resets)
+        }
+        // A reading that arrived but is too old, or describes a window that has
+        // already reset, is still a miss for the purpose of rescanning: without
+        // this an installed-but-closed Desktop re-walks the cache every poll.
+        // The reset block above is kept either way — it outlives the windows.
+        if desktop != nil, !showable {
+            noteDesktopMiss(at: now)
         }
         // Ahead of the back-off check on purpose. That deadline is the
         // endpoint's, and the CLI does not share the endpoint's rate limit —
         // there is no reason for a 429 on one to darken a ring the other can
         // still fill.
-        if let windows = await cliWindows() {
-            return snapshot(windows: windows, plan: lastCLIPlan)
+        // Only for the default login, and only while it is the sole one.
+        // `claude /usage` in print mode gives one answer for the whole
+        // machine whatever CLAUDE_CONFIG_DIR says (verified: identical
+        // output, requests and sessions included, for ~/.claude and a second
+        // config directory), so with two logins it would paint both rings
+        // with the same figure. Named profiles read their own token instead.
+        if Self.cliEstimateApplies(slug: profile.slug, loginCount: Self.loginCount),
+           let windows = await cliWindows(reusableFor: cliAllowance) {
+            return snapshot(windows: windows, plan: lastCLIPlan, resetCredits: resets)
         }
+        do {
+            var result = try await fetchFromKeychain()
+            if result.resetCredits == nil { result.resetCredits = resets }
+            return result
+        } catch {
+            // Skipping a reading we are holding is only worth it while some live
+            // source can answer instead. Where none can — no Claude Code, no
+            // usable token, a 429 — that reading is still the truth about the
+            // account, and asking for a fresher one must never leave the ring
+            // emptier than not asking would have. Only when something was
+            // actually skipped: at `.standard` the reading was already offered
+            // above, so there is nothing here to reconsider.
+            if let desktop, showable, desktopAllowance < desktopFreshness {
+                return snapshot(windows: desktop.windows, plan: profile.organizationPlan(),
+                                resetCredits: resets)
+            }
+            throw error
+        }
+    }
+
+    /// The CLI's estimate is "based on local sessions on this machine", all
+    /// of them, so it is only the truth about one login when there is one.
+    nonisolated static func cliEstimateApplies(slug: String?, loginCount: Int) -> Bool {
+        slug == nil && loginCount <= 1
+    }
+
+    /// Not under test: the suite runs on whatever Mac hosts it, and its CLI
+    /// stubs must be reached whatever that Mac's logins are.
+    private static let loginCount: Int = Runtime.isUnderTest ? 1 : ClaudeProfile.discover().count
+
+    private func fetchFromKeychain() async throws -> ProviderSnapshot {
         if Self.shouldHoldOff(until: retryNoEarlierThan, slack: backoffSlack),
            let retryNoEarlierThan {
             let remaining = retryNoEarlierThan.timeIntervalSinceNow
@@ -200,7 +338,8 @@ actor ClaudeOAuthProvider: UsageProvider {
     /// The snapshot shape every source produces. One place, so a window order or
     /// a headline changed for the endpoint cannot quietly differ from the CLI's or
     /// Desktop's — the three are the same reading taken from three places.
-    private func snapshot(windows: [LimitWindow], plan: String? = nil) -> ProviderSnapshot {
+    private func snapshot(windows: [LimitWindow], plan: String? = nil,
+                          resetCredits: UsageResetCredits? = nil) -> ProviderSnapshot {
         ProviderSnapshot(
             id: id,
             displayName: displayName,
@@ -208,12 +347,22 @@ actor ClaudeOAuthProvider: UsageProvider {
             fidelity: .official,
             status: .ok,
             windows: windows,
-            headlineID: "session",
+            headlineID: UsageResponse.headlineID(for: windows),
             // #102's second ring. The helper is the only place a Claude
             // snapshot is built now, so this is the only place it can go.
             weeklyID: "weekly_all",
-            plan: plan?.nonEmptyPlan
+            plan: Self.planName(plan),
+            resetCredits: resetCredits
         )
+    }
+
+    /// The plan the way Claude names it: the credential says `enterprise`, the
+    /// product says "Enterprise". Anything that is not one bare word — the
+    /// CLI's "extra usage", say — is shown exactly as it came.
+    nonisolated static func planName(_ raw: String?) -> String? {
+        guard let plan = raw?.nonEmptyPlan else { return nil }
+        guard plan.allSatisfy(\.isLowercase) else { return plan }
+        return plan.prefix(1).uppercased() + plan.dropFirst()
     }
 
     /// What Claude Desktop's cache holds for *this* profile's account, or nil.
@@ -224,12 +373,10 @@ actor ClaudeOAuthProvider: UsageProvider {
     /// on — is a reason to ask the next source, not a reason to fail the refresh
     /// and put an invented status on the ring.
     ///
-    /// A snapshot past `desktopFreshness` is *not* returned. That is what keeps
-    /// the ring honest without any new state: dropping through leaves the last
-    /// good reading to `UsageStore`, which already re-shows it with the age it
-    /// actually has and dims it — where returning it here would present numbers
-    /// from an hour ago as a live `.ok`.
-    private func desktopWindows() async -> [LimitWindow]? {
+    /// The caller checks usage freshness separately. An older entry can still
+    /// contain a valid last-known reset grant, shown explicitly as cached with
+    /// its observation time rather than presented as a live reading.
+    private func desktopReading() async -> ClaudeDesktopUsageCache.Reading? {
         guard let desktopCache else { return nil }
         let now = Date()
         // A recent miss means the next read would be a full scan for something
@@ -258,22 +405,12 @@ actor ClaudeOAuthProvider: UsageProvider {
             return nil
         }
 
-        guard reading.isFresh(at: now, within: desktopFreshness) else {
-            lastDesktopMiss = now
-            Log.usage.debug("\(self.id, privacy: .public): claude desktop snapshot is too old to show as live")
-            return nil
-        }
-        // Inside the freshness window but describing a period that has already
-        // ended. Desktop can hold such an entry for half an hour, which is long
-        // enough to hide a reset entirely.
-        guard !Self.hasExpiredWindow(reading.windows, at: now) else {
-            lastDesktopMiss = now
-            Log.usage.debug("\(self.id, privacy: .public): claude desktop snapshot describes a window that has already reset")
-            return nil
-        }
+
+        // The caller rejects expired usage windows separately: the unused
+        // reset grant can still be current when a five-hour window has ended.
         lastDesktopMiss = nil
         Log.usage.debug("\(self.id, privacy: .public): read \(reading.windows.count) windows from the claude desktop cache entry \(reading.entry.lastPathComponent, privacy: .public)")
-        return reading.windows
+        return reading
     }
 
     /// Whether any window in a reading names a reset time that has already
@@ -293,7 +430,7 @@ actor ClaudeOAuthProvider: UsageProvider {
     /// endpoint instead, not a reason to fail the refresh. The endpoint's
     /// errors are also the ones `UsageStore` knows how to word, and a status
     /// invented here would be a second vocabulary saying the same things.
-    private func cliWindows() async -> [LimitWindow]? {
+    private func cliWindows(reusableFor reuseInterval: TimeInterval) async -> [LimitWindow]? {
         guard let cli else { return nil }
         let now = Date()
 
@@ -306,23 +443,29 @@ actor ClaudeOAuthProvider: UsageProvider {
         // reset show up minutes after it happened, so it drops through to the
         // live sources instead.
         if let last = lastCLIWindows,
-           now.timeIntervalSince(last.at) < cliRefreshInterval,
+           now.timeIntervalSince(last.at) < reuseInterval,
            !Self.hasExpiredWindow(last.windows, at: now) {
             return last.windows
         }
-        if let lastCLIAttempt, now.timeIntervalSince(lastCLIAttempt) < cliRefreshInterval {
+        // The lock-out after a signed-out CLI keeps its full interval whatever
+        // the caller asked for. A live reading is worth a subprocess; it is not
+        // worth one that has already told us it cannot answer.
+        if let lastCLIFailure, now.timeIntervalSince(lastCLIFailure) < cliRefreshInterval {
             return nil
         }
-        lastCLIAttempt = now
 
         do {
             let reading = try await cli.readWithPlan(profile: profile, now: now)
             lastCLIWindows = (reading.windows, now)
             lastCLIPlan = reading.plan
+            lastCLIFailure = nil
             Log.usage.debug("\(self.id, privacy: .public): read \(reading.windows.count) windows from claude /usage")
             return reading.windows
         } catch {
             Log.usage.debug("\(self.id, privacy: .public): claude /usage did not answer, falling back to the token")
+            if case UsageProviderError.needsAuth = error {
+                lastCLIFailure = now
+            }
             return nil
         }
     }
@@ -365,7 +508,18 @@ actor ClaudeOAuthProvider: UsageProvider {
         }
 
         let payload = try UsageResponse.decoder.decode(UsageResponse.self, from: data)
-        return snapshot(windows: payload.limitWindows(), plan: credentials?.subscriptionType)
+        let windows = payload.limitWindows()
+        // Answered, and signed in, but no limit in it: some Enterprise and team
+        // accounts come back this way (#178). An empty reading drew nothing and
+        // left "Waiting for the first reading…" up for good; say what happened.
+        guard !windows.isEmpty else {
+            Log.usage.notice("claude usage endpoint answered with no limit windows")
+            throw UsageProviderError.nothingMetered(
+                L10n.t("Claude answered, but listed no usage limits for this account. Some Enterprise and team plans don't report them.")
+            )
+        }
+        return snapshot(windows: windows, plan: credentials?.subscriptionType,
+                        resetCredits: payload.cedarEmber?.credits(at: Date()))
     }
 
     private func currentToken() throws -> String {
@@ -425,7 +579,8 @@ actor ClaudeOAuthProvider: UsageProvider {
     nonisolated var signInRoute: SignInRoute {
         // Names the command for a profile, because that is the only way to
         // reach it: plain `claude` signs the default one in, not this.
-        .guidance(L10n.t("Run `\(profile.signInCommand)` once — it signs in and is what these readings come from. Use /login there to change account."))
+        .command("\(profile.signInCommand) auth login", name: displayName,
+                 install: URL(string: "https://docs.claude.com/en/docs/claude-code/setup"))
     }
 
     /// Reached only from "Allow access…", so this is the one path allowed to
@@ -533,9 +688,58 @@ struct UsageResponse: Decodable {
         let resetsAt: Date?
     }
 
+    /// A seat billed against credits rather than a plan: the balance and the
+    /// cap, each as an amount in minor units with its own currency.
+    ///
+    /// Deliberately read instead of the flat `extra_usage` block beside it,
+    /// which carries the same two figures without saying which currency they
+    /// are in — this one does, and an amount whose currency is assumed is a
+    /// number that reads right and means something else.
+    struct Spend: Decodable {
+        struct Amount: Decodable {
+            let amountMinor: Double?
+            let currency: String?
+            /// Decimal places, so 20000 with exponent 2 is 200.00.
+            let exponent: Int?
+
+            var value: Double? {
+                guard let amountMinor else { return nil }
+                return amountMinor / pow(10, Double(exponent ?? 2))
+            }
+        }
+
+        /// False on a seat that has no credit spending at all, where a ring
+        /// reading "0 of 0" would be an invention.
+        let enabled: Bool?
+        let used: Amount?
+        let limit: Amount?
+    }
+
     let limits: [Limit]?
     let fiveHour: Window?
     let sevenDay: Window?
+    let cedarEmber: ClaudeResetCredits?
+    let reportsResetCredits: Bool
+    let spend: Spend?
+
+    private enum CodingKeys: String, CodingKey {
+        case limits, fiveHour, sevenDay, cedarEmber, spend
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        limits = try container.decodeIfPresent([Limit].self, forKey: .limits)
+        fiveHour = try container.decodeIfPresent(Window.self, forKey: .fiveHour)
+        sevenDay = try container.decodeIfPresent(Window.self, forKey: .sevenDay)
+        // Optional enrichment must never cost the usage reading. A malformed
+        // non-null block also supersedes older cached reset data.
+        reportsResetCredits = container.contains(.cedarEmber)
+            && (try? container.decodeNil(forKey: .cedarEmber)) == false
+        cedarEmber = try? container.decodeIfPresent(ClaudeResetCredits.self, forKey: .cedarEmber)
+        // Tolerated for the same reason: on a plan seat the balance is an
+        // extra, and a shape change in it must not cost the plan's windows.
+        spend = try? container.decodeIfPresent(Spend.self, forKey: .spend)
+    }
 
     /// How this response is read, wherever it is read from.
     ///
@@ -593,7 +797,64 @@ struct UsageResponse: Decodable {
         merge(fiveHour, id: "session", label: L10n.t("Current session"))
         merge(sevenDay, id: "weekly_all", label: L10n.t("All models"))
 
+        // An Enterprise seat reports *only* this: `limits` comes back empty and
+        // both named windows are null, so without it such a seat has no
+        // reading at all and its ring says "Waiting for the first reading…"
+        // for ever.
+        //
+        // Nothing else in the response is read, on purpose. Several top-level
+        // objects — `amber_ladder`, `nimbus_quill`, `tangelo` — carry
+        // `limit_dollars` and `resets_at` and look exactly like windows, but
+        // they are internal codenames whose meaning is not published and can
+        // change without notice. A ring drawn from one would be a number
+        // presented as a limit without anybody knowing which limit.
+        if let balance = spendWindow() { windows.append(balance) }
+
         return windows.sorted(by: UsageResponse.displayOrder)
+    }
+
+    /// Which window the ring means.
+    ///
+    /// The session where there is one: that is what Claude Code's own `/usage`
+    /// leads with, and promoting another of the plan's windows into its place
+    /// would silently change what the ring is about — so where a session is
+    /// merely missing from a response, "session" stays declared and the cell
+    /// shows a dash rather than a weekly percentage wearing the session's
+    /// place.
+    ///
+    /// A credit seat is not that case. It reports no session window at all,
+    /// ever, so there is nothing to promote *over* — and declaring one anyway
+    /// left the ring showing a dash beside a card that was full of numbers.
+    static func headlineID(for windows: [LimitWindow]) -> String {
+        if windows.contains(where: { $0.id == "session" }) { return "session" }
+        if let balance = windows.first(where: { $0.money != nil }) { return balance.id }
+        return "session"
+    }
+
+    /// The credit balance as a window, or nil where the seat has none.
+    ///
+    /// The share is the two amounts divided rather than `spend.percent`, which
+    /// is rounded to whole percent: at $2.97 of $200 that field says `1` while
+    /// the true figure is 1.485%, and the bar under the tooltip would sit
+    /// visibly left of where the numbers beside it say it should.
+    func spendWindow() -> LimitWindow? {
+        guard let spend, spend.enabled != false,
+              let used = spend.used?.value,
+              let limit = spend.limit?.value, limit > 0
+        else { return nil }
+
+        return LimitWindow(
+            id: "spend",
+            label: L10n.t("Spend limit"),
+            usedFraction: used / limit,
+            money: UsageMoneyBreakdown(
+                currency: spend.limit?.currency ?? spend.used?.currency ?? "USD",
+                spent: used,
+                remaining: max(limit - used, 0)
+            )
+            // No reset time: the response does not carry one for this block,
+            // and a balance still says what it says without one.
+        )
     }
 
     static func duration(forKind kind: String) -> TimeInterval? {
@@ -627,6 +888,9 @@ struct UsageResponse: Decodable {
         func rank(_ id: String) -> Int {
             if id == "session" { return 0 }
             if id == "weekly_all" { return 1 }
+            // Last: a balance is not one of the plan's periods, and on a seat
+            // that has both it is the odd one out rather than another window.
+            if id == "spend" { return 3 }
             return 2
         }
         let (ra, rb) = (rank(a.id), rank(b.id))

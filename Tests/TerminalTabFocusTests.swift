@@ -30,6 +30,12 @@ final class TerminalTabFocusTests: XCTestCase {
                                                   pid: getpid(), tty: "ttys014", cwd: "/tmp"))
     }
 
+    /// Ghostty is matched by working directory; without one there is nothing to ask for.
+    func testGhosttyWithoutACwdIsNotSelected() {
+        XCTAssertFalse(TerminalTabFocus.selectTab(bundleID: "com.mitchellh.ghostty",
+                                                  pid: getpid(), tty: "ttys014", cwd: nil))
+    }
+
     func testNoSurfaceAndNoCwdMeansNoCmuxTab() {
         // A pid whose tree carries no CMUX_SURFACE_ID and no fallback cwd.
         XCTAssertFalse(TerminalTabFocus.selectTab(bundleID: "com.cmuxterm.app",

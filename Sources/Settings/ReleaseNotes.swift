@@ -32,6 +32,276 @@ enum ReleaseNotes {
     static var all: [ReleaseNote] {
         [
             ReleaseNote(
+                version: "1.20.0",
+                headline: L10n.t("See what each project spent of your allowance, and figures that keep up while you work."),
+                changes: [
+                    ReleaseNote.Change(
+                        title: L10n.t("Cost per project"),
+                        detail: L10n.t("A new Costs section reads the transcripts Claude Code and Codex already keep, and shows what each project spent of each login's allowance — by day, week and month, priced from your plan. Usage from before Codenotch was running is shown as other, never guessed.")
+                    ),
+                    ReleaseNote.Change(
+                        title: L10n.t("Figures that keep up"),
+                        detail: L10n.t("While a session is working, the percentage is read fresh rather than from a cache up to half an hour old, and the countdown follows the clock to the second.")
+                    ),
+                    ReleaseNote.Change(
+                        title: L10n.t("A menu bar item as wide as what it says"),
+                        detail: L10n.t("No more empty room kept for figures that are shorter than their longest; the width changes only when a figure gains or loses a character.")
+                    ),
+                    ReleaseNote.Change(
+                        title: L10n.t("Abacus.AI credits"),
+                        detail: L10n.t("A preset for custom endpoints shows a RouteLLM account's monthly credits and any bought on top.")
+                    ),
+                    ReleaseNote.Change(
+                        title: L10n.t("OpenCode and Grok stay signed in"),
+                        detail: L10n.t("OpenCode's sign-in is read from where recent versions keep it, and an expired Grok session is renewed rather than left at zero until the next login.")
+                    ),
+                    ReleaseNote.Change(
+                        title: L10n.t("Polished Português do Brasil"),
+                        detail: L10n.t("Clearer wording throughout.")
+                    ),
+                ]
+            ),
+            ReleaseNote(
+                version: "1.19.0",
+                headline: L10n.t("Carry the notch anywhere round your screen by its six dots — and new versions now ask first, right in the notch."),
+                changes: [
+                    ReleaseNote.Change(
+                        title: L10n.t("Six dots to carry the notch"),
+                        detail: L10n.t("Hover the settings button and six dots come out beside it. Hold them and drag: the notch follows along any edge of the screen and round its corners, and lands where you let go. They replace the separate move handle at the other end, and its setting.")
+                    ),
+                    ReleaseNote.Change(
+                        title: L10n.t("Round the corners like liquid"),
+                        detail: L10n.t("Dragged — by the dots or with ⌥ — the notch keeps to the screen's border and flows round each corner instead of jumping between edges, and settles smoothly where it is let go.")
+                    ),
+                    ReleaseNote.Change(
+                        title: L10n.t("Updates ask first, in the notch"),
+                        detail: L10n.t("A new version is offered in the notch with Update and Later, and installs there with its progress. Put off, a red dot on the settings button and on General keeps it in reach.")
+                    ),
+                    ReleaseNote.Change(
+                        title: L10n.t("A notch that pours"),
+                        detail: L10n.t("The settings arc and the dots come out of the notch and go back into it like goo, the settings button turns back into its arc, and joined to your Mac's notch the ends meet the screen's border exactly.")
+                    ),
+                    ReleaseNote.Change(
+                        title: L10n.t("The percentage beside your Mac's notch"),
+                        detail: L10n.t("With one ring and its percentage on, the figure sits on the other side of the camera housing, sized to fit.")
+                    ),
+                    ReleaseNote.Change(
+                        title: L10n.t("Switching a provider on no longer hangs the app"),
+                        detail: L10n.t("Looking for a provider's command-line tool could deadlock the app while Settings redrew.")
+                    ),
+                ]
+            ),
+            ReleaseNote(
+                version: "1.18.0",
+                headline: L10n.t("On a MacBook the notch is now your Mac's own — the readings sit either side of the camera housing rather than under it."),
+                changes: [
+                    ReleaseNote.Change(
+                        title: L10n.t("The readings moved beside the notch"),
+                        detail: L10n.t("On a Mac with a camera housing the rings used to hang below it, so the app read as a second notch under the real one. They now sit either side of the cutout, in a bar drawn to the hardware's own measurements: its depth, and a corner fitted to the real thing rather than guessed at. Folded away it is the cutout exactly, and reaching for it widens the notch the Mac already has.")
+                    ),
+                    ReleaseNote.Change(
+                        title: L10n.t("A fold that flows"),
+                        detail: L10n.t("Opening and closing morphs the shape itself rather than swapping one for another, on a spring with enough weight to settle instead of snapping. The curve into the screen's border grows with the ears as they extend.")
+                    ),
+                    ReleaseNote.Change(
+                        title: L10n.t("The percentage under each ring is now yours to choose"),
+                        detail: L10n.t("Appearance has a switch for it. Beside the Mac's own notch the bar is exactly as deep as the cutout and a ring fills it, so showing the figure there makes room by drawing the rings smaller — worth offering rather than deciding for you.")
+                    ),
+                    ReleaseNote.Change(
+                        title: L10n.t("A click that misses the rings no longer locks the notch open"),
+                        detail: L10n.t("It used to pin it, with nothing on screen to say so or to undo it. Keep open is on the right-click menu, where it is named and carries a checkmark.")
+                    ),
+                    ReleaseNote.Change(
+                        title: L10n.t("The weekly limit can be the main ring"),
+                        detail: L10n.t("For anyone who budgets by the week rather than by the session. The session moves to the thin ring and the card.")
+                    ),
+                    ReleaseNote.Change(
+                        title: L10n.t("Claude's unused resets, and a steadier Desktop reading"),
+                        detail: L10n.t("Resets you did not spend are shown rather than dropped, dated grants survive a refresh, and the search through Desktop's cache is bounded so an unusable reading backs off instead of retrying.")
+                    ),
+                    ReleaseNote.Change(
+                        title: L10n.t("Türkçe and Bahasa Indonesia"),
+                        detail: L10n.t("Two more languages, both complete.")
+                    ),
+                    ReleaseNote.Change(
+                        title: L10n.t("A colour ramp across the whole range"),
+                        detail: L10n.t("Opt in to a ring that shifts colour continuously from empty to full, instead of stepping at the thresholds.")
+                    ),
+                    ReleaseNote.Change(
+                        title: L10n.t("Qianwen's monthly Token Plan, and two numbers that are not numbers"),
+                        detail: L10n.t("The monthly plan the weekly fields miss is read properly, and a MiniMax count that overflows or comes back non-finite is treated as no reading rather than as a zero.")
+                    ),
+                ]
+            ),
+            ReleaseNote(
+                version: "1.17.0",
+                headline: L10n.t("Your own endpoints, 한국어 and Oʻzbekcha, and a notch that knows whose account it is."),
+                changes: [
+                    ReleaseNote.Change(
+                        title: L10n.t("Your own endpoints"),
+                        detail: L10n.t("Add any OpenAI-compatible endpoint and give it a ring: a name, an icon, a colour, a monthly budget in dollars or tokens, and a live check that says whether it is actually answering. The key goes to the keychain. A scan finds the usual local ports, so a model running on this Mac does not have to be typed in.")
+                    ),
+                    ReleaseNote.Change(
+                        title: L10n.t("Amp"),
+                        detail: L10n.t("A ring for the Amp CLI, read from the sign-in it already has.")
+                    ),
+                    ReleaseNote.Change(
+                        title: L10n.t("한국어 and Oʻzbekcha"),
+                        detail: L10n.t("Korean is the most completely translated language in the app, on the Mac and on Windows. Uzbek joins in Latin script. The release notes you are reading were the last thing missing from several languages, and are now in the catalogue too.")
+                    ),
+                    ReleaseNote.Change(
+                        title: L10n.t("Rings that know whose account they are"),
+                        detail: L10n.t("A Claude ring is named after the account behind it rather than the folder it was found in, a session the desktop app hosts is drawn against the account that owns it, and every Codex conversation is named and counted separately. You can rename any account, and the new name is used everywhere at once.")
+                    ),
+                    ReleaseNote.Change(
+                        title: L10n.t("Quieter"),
+                        detail: L10n.t("Opening Codenotch no longer announces a limit that was reached long before: a reading kept from last time is no longer mistaken for something that just happened. Clicking the notch to hold it open lasts the session rather than for good, so the full-screen fold is never disabled behind your back.")
+                    ),
+                    ReleaseNote.Change(
+                        title: L10n.t("The menu bar shows more"),
+                        detail: L10n.t("Weekly usage beside the five-hour window, and its own switch reachable from the menu bar itself.")
+                    ),
+                    ReleaseNote.Change(
+                        title: L10n.t("A lighter Windows notch"),
+                        detail: L10n.t("A Theme row — System, Light or Dark — that the notch, the settings window and the drag overlay all follow. Português (Brasil) joins the Windows port, and the move handle stays on screen while you drag it.")
+                    ),
+                ]
+            ),
+            ReleaseNote(
+                version: "1.16.0",
+                headline: L10n.t("Windows updates itself, five-hour limits in the menu bar, and a notch you can fold away."),
+                changes: [
+                    ReleaseNote.Change(
+                        title: L10n.t("Five-hour limits in the menu bar"),
+                        detail: L10n.t("Off until you ask for it: choose which accounts to show and the menu bar carries their session share and countdown, beside the notch rather than instead of it.")
+                    ),
+                    ReleaseNote.Change(
+                        title: L10n.t("Every Antigravity account"),
+                        detail: L10n.t("More than one Antigravity profile now reads, each with its own ring and its own answer to a keychain prompt.")
+                    ),
+                    ReleaseNote.Change(
+                        title: L10n.t("Clearer glass"),
+                        detail: L10n.t("Tooltip copy keeps its footing on Liquid Glass in dark mode, where a pale desktop behind it used to wash the secondary lines out.")
+                    ),
+                    ReleaseNote.Change(
+                        title: L10n.t("Windows keeps itself up to date"),
+                        detail: L10n.t("It looks for a new version shortly after it starts and can install one for you, checking the download's signature first. Until now a Windows install stayed on the build it was installed from.")
+                    ),
+                    ReleaseNote.Change(
+                        title: L10n.t("A Windows notch that moves"),
+                        detail: L10n.t("Carry it between monitors by its handle, slide it along an edge with Alt held down, and fold it to a pill when it is not in use, as Show on hover does on the Mac.")
+                    ),
+                    ReleaseNote.Change(
+                        title: L10n.t("Z.AI and every Claude account on Windows"),
+                        detail: L10n.t("A ring for the Z.AI Coding Plan, one for each Claude account rather than only the default one, and Claude sign-in from the card itself.")
+                    ),
+                    ReleaseNote.Change(
+                        title: L10n.t("日本語, and Russian notch placement"),
+                        detail: L10n.t("The release notes read in Japanese, and the Windows notch placement settings in Russian.")
+                    ),
+                ]
+            ),
+            ReleaseNote(
+                version: "1.15.0",
+                headline: L10n.t("QianwenAI reads again, fewer false alerts, and a steadier Windows notch."),
+                changes: [
+                    ReleaseNote.Change(
+                        title: L10n.t("QianwenAI reads again"),
+                        detail: L10n.t("The ring no longer answers \"HTTP 0\" on every refresh, and says so plainly when QianwenAI refuses a request.")
+                    ),
+                    ReleaseNote.Change(
+                        title: L10n.t("Only real resets"),
+                        detail: L10n.t("A countdown that drifts by a few seconds no longer announces a reset, while a real one still does.")
+                    ),
+                    ReleaseNote.Change(
+                        title: L10n.t("Grok, even headless"),
+                        detail: L10n.t("Grok shows as working during grok -p runs, not only in its own window.")
+                    ),
+                    ReleaseNote.Change(
+                        title: L10n.t("The Windows notch stays clear of the taskbar"),
+                        detail: L10n.t("It sits inside the work area and finds its edge again when the taskbar moves, and its rings dim when a reading is old, with rounded ends, as on the Mac.")
+                    ),
+                    ReleaseNote.Change(
+                        title: L10n.t("Smaller fixes"),
+                        detail: L10n.t("Checking for updates can no longer hang on \"Checking…\", a small context reading still draws an arc, Claude's account file is only read again when it changes, and the Traditional Chinese uses Taiwan's own words.")
+                    ),
+                ]
+            ),
+            ReleaseNote(
+                version: "1.14.0",
+                headline: L10n.t("A new Settings, QianwenAI, Traditional Chinese, and a Windows notch you can carry to any edge."),
+                changes: [
+                    ReleaseNote.Change(
+                        title: L10n.t("A new Settings"),
+                        detail: L10n.t("Dark and quiet, with a title over every pane, the providers' own logos, and DeepSeek, Ollama and LM Studio folded under Accounts. Everything answers the pointer, and an Update button appears beside the version when there is one.")
+                    ),
+                    ReleaseNote.Change(
+                        title: L10n.t("QianwenAI"),
+                        detail: L10n.t("A ring for QianwenAI's Token Plan, signed into from Codenotch.")
+                    ),
+                    ReleaseNote.Change(
+                        title: L10n.t("繁體中文, and every language complete"),
+                        detail: L10n.t("Traditional Chinese on the Mac and Windows, picked up automatically in Taiwan and Hong Kong, and Simplified Chinese and Ukrainian now cover every string.")
+                    ),
+                    ReleaseNote.Change(
+                        title: L10n.t("The Windows notch, carried anywhere"),
+                        detail: L10n.t("Drag it by its handle to any edge, open Settings from its orb, click a ring to read it again or right-click for more, and the hover card stays clear of the taskbar.")
+                    ),
+                    ReleaseNote.Change(
+                        title: L10n.t("Fresh logos"),
+                        detail: L10n.t("MiniMax, QianwenAI, Z.ai, Kimi, OpenCode and Command Code now show their own marks.")
+                    ),
+                ]
+            ),
+            ReleaseNote(
+                version: "1.13.1",
+                headline: L10n.t("Fixes a crash on Chinese Macs, and a Deny on the keychain question now means no."),
+                changes: [
+                    ReleaseNote.Change(
+                        title: L10n.t("No more crash in Simplified Chinese"),
+                        detail: L10n.t("With the app in 简体中文, a provider past 80% crashed Codenotch a few seconds after launch. Every translation is now checked for this.")
+                    ),
+                    ReleaseNote.Change(
+                        title: L10n.t("Deny means no"),
+                        detail: L10n.t("Answering Deny when macOS asks about a saved login now stops Codenotch reading that account from any source, until you choose Allow access… again.")
+                    ),
+                    ReleaseNote.Change(
+                        title: L10n.t("Fewer file access prompts"),
+                        detail: L10n.t("Renewing Claude's login no longer starts your MCP servers and hooks, and Kimi sessions are matched without looking inside your folders, so macOS no longer asks about Documents, Desktop or network volumes on Codenotch's behalf.")
+                    ),
+                    ReleaseNote.Change(
+                        title: L10n.t("Smaller fixes"),
+                        detail: L10n.t("Kiro reads usage from newer kiro-cli versions, GLM Start Plan says why it has no usage, a Claude account with no published limits says so instead of waiting, and the Windows notch clears a stuck waiting card after a day.")
+                    ),
+                ]
+            ),
+            ReleaseNote(
+                version: "1.13.0",
+                headline: L10n.t("Much lighter on your battery, Grok and screen edges on Windows, and a Windows Settings window that opens again."),
+                changes: [
+                    ReleaseNote.Change(
+                        title: L10n.t("Lighter on the battery"),
+                        detail: L10n.t("Codenotch idles at a fraction of the CPU it used, and moving the pointer costs less than half as much. The working spinner is drawn by the system instead of redrawing the notch every frame, and full-screen apps are checked every two seconds rather than on every movement.")
+                    ),
+                    ReleaseNote.Change(
+                        title: L10n.t("Windows Settings opens again"),
+                        detail: L10n.t("In 1.12.0 the Settings window on Windows opened empty. It is fixed, and a check now stops that kind of mistake from shipping.")
+                    ),
+                    ReleaseNote.Change(
+                        title: L10n.t("Grok, any screen edge, and readings in the tray on Windows"),
+                        detail: L10n.t("Grok joins the Windows notch, the notch can sit on any edge of any monitor, and the tray menu shows each provider's readings.")
+                    ),
+                    ReleaseNote.Change(
+                        title: L10n.t("Ghostty tabs"),
+                        detail: L10n.t("Clicking a session running in Ghostty selects its tab rather than only bringing Ghostty forward.")
+                    ),
+                    ReleaseNote.Change(
+                        title: L10n.t("Smaller fixes"),
+                        detail: L10n.t("Codex sessions are read from the end of the file instead of all of it, the Codex card hides an empty reset-credits section, and a Claude token on Windows that fails to renew is retried instead of freezing the card.")
+                    ),
+                ]
+            ),
+            ReleaseNote(
                 version: "1.12.1",
                 headline: L10n.t("A workweek pace guide under Claude's weekly ring."),
                 changes: [

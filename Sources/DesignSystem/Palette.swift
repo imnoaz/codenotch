@@ -26,14 +26,34 @@ enum Palette {
     static let barTrack      = Color(dark: .white.withAlphaComponent(0.176),
                                      light: .black.withAlphaComponent(0.15))
 
-    static let ample         = Color(dark: NSColor(hex: 0x00FF88), light: NSColor(hex: 0x00A356))
+    /// Named so `UsageBand.rampColor` can interpolate between them per-appearance rather
+    /// than blending two already-resolved `Color`s (which would mix in whichever appearance
+    /// happened to be current when the `Color` was built, not the one it draws in).
+    static let amplePair: (dark: UInt32, light: UInt32) = (0x00FF88, 0x00A356)
+    static let watchPair: (dark: UInt32, light: UInt32) = (0xF2FF00, 0xB08800)
+    /// Already 3.5:1 on white, so the warning colour is the same in both.
+    static let criticalPair: (dark: UInt32, light: UInt32) = (0xFF3F00, 0xFF3F00)
+
+    static let ample         = Color(dark: NSColor(hex: amplePair.dark), light: NSColor(hex: amplePair.light))
+    static let watch         = Color(dark: NSColor(hex: watchPair.dark), light: NSColor(hex: watchPair.light))
+    static let critical      = Color(dark: NSColor(hex: criticalPair.dark), light: NSColor(hex: criticalPair.light))
     /// The workweek ideal-usage reference bars: `ample`'s hue, dimmed so it
     /// reads as a guideline sitting under the real usage bar rather than as a
     /// second claim of the same weight.
     static let workweekIdealBar = ample.opacity(0.55)
-    static let watch         = Color(dark: NSColor(hex: 0xF2FF00), light: NSColor(hex: 0xB08800))
-    /// Already 3.5:1 on white, so the warning colour is the same in both.
-    static let critical      = Color(hex: 0xFF3F00)           // orange
+
+    /// A continuous point between two palette anchors, each resolved for the current
+    /// appearance first and interpolated in sRGB channels second — resolving after
+    /// interpolating would blend whichever appearance was current when the ramp was
+    /// evaluated into every later draw, not the appearance it is actually drawn in.
+    static func ramp(from: (dark: UInt32, light: UInt32), to: (dark: UInt32, light: UInt32), fraction: Double) -> Color {
+        let t = min(max(fraction, 0), 1)
+        return Color(nsColor: NSColor(name: nil) { appearance in
+            let isDark = appearance.bestMatch(from: [.aqua, .darkAqua]) == .darkAqua
+            return NSColor(hex: isDark ? from.dark : from.light)
+                .blendedByChannel(with: NSColor(hex: isDark ? to.dark : to.light), fraction: t)
+        })
+    }
 
     // Generation-speed bands are independent of cloud quota usage.
     static let generationFast = Color(hex: 0x0A84FF)          // blue
@@ -51,8 +71,21 @@ enum Palette {
     /// to be `solid`.
     static let darkGlassDim = Color.black.opacity(0.60)
 
+    /// Tooltip copy retains the frame's #808080 secondary ink in Dark glass.
+    /// It needs a deeper local backing than the notch itself when a light
+    /// desktop is visible through `Glass.clear`, otherwise the two greys merge.
+    static let darkGlassTooltipDim = Color.black.opacity(0.80)
+
+    /// A tooltip-only wash for standard Liquid Glass in dark appearance. It is
+    /// intentionally weaker than `darkGlassDim`: regular glass stays visibly
+    /// distinct from the user-selected always-dark surface.
+    static let liquidGlassTooltipDim = Color.black.opacity(0.35)
+
     static let textPrimary   = Color(dark: .white, light: .black)
     static let textSecondary = Color(dark: NSColor(hex: 0x808080), light: NSColor(hex: 0x6B6B6B))
+    /// Used only by dark, standard Liquid Glass tooltips. Other surfaces keep
+    /// `textSecondary`, including their frame-accurate #808080 dark ink.
+    static let readableTooltipTextSecondary = Color(dark: NSColor(hex: 0xC2C2C2), light: NSColor(hex: 0x6B6B6B))
 }
 
 extension Color {
@@ -85,6 +118,21 @@ extension NSColor {
             alpha:   1
         )
     }
+
+    /// A linear per-channel sRGB lerp — the same arithmetic the Windows ramp does in JS, kept
+    /// deliberately simple rather than going through `blended(withFraction:of:)`, whose
+    /// blending colour space is not something either side of a Mac/Windows parity claim
+    /// should depend on.
+    func blendedByChannel(with other: NSColor, fraction: CGFloat) -> NSColor {
+        guard let a = usingColorSpace(.sRGB), let b = other.usingColorSpace(.sRGB) else { return self }
+        func lerp(_ x: CGFloat, _ y: CGFloat) -> CGFloat { x + (y - x) * fraction }
+        return NSColor(
+            srgbRed: lerp(a.redComponent, b.redComponent),
+            green:   lerp(a.greenComponent, b.greenComponent),
+            blue:    lerp(a.blueComponent, b.blueComponent),
+            alpha:   1
+        )
+    }
 }
 
 private struct CodenotchReduceTransparencyKey: EnvironmentKey {
@@ -104,6 +152,19 @@ private struct CodenotchHeadlessGlassKey: EnvironmentKey {
     static let defaultValue: Bool = false
 }
 
+private struct TooltipSecondaryInkKey: EnvironmentKey {
+    static let defaultValue = Palette.textSecondary
+}
+
+extension EnvironmentValues {
+    /// Secondary ink resolved for the current tooltip surface. This stays
+    /// frame-accurate unless ordinary dark Liquid Glass needs extra contrast.
+    var tooltipSecondaryInk: Color {
+        get { self[TooltipSecondaryInkKey.self] }
+        set { self[TooltipSecondaryInkKey.self] = newValue }
+    }
+}
+
 extension EnvironmentValues {
     /// Draw the glass path with the system material left out. Tests only; the
     /// app never sets it.
@@ -121,4 +182,3 @@ extension EnvironmentValues {
         set { self[CodenotchHeadlessGlassKey.self] = newValue }
     }
 }
-

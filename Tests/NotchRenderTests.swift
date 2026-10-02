@@ -117,25 +117,6 @@ final class NotchRenderTests: XCTestCase {
         XCTAssertGreaterThan(colour(.outside), off, "outside painted no arc")
     }
 
-    /// Hiding the move handle takes its arc off the notch, and leaves nothing
-    /// behind that can still be hovered or pressed — an invisible control that
-    /// starts a move is worse than a visible one.
-    func testAHiddenMoveHandleIsNeitherDrawnNorPressable() throws {
-        let shown = model(edge: .right)
-        let point = try XCTUnwrap(shown.moveHandlePoints.first)
-        XCTAssertTrue(shown.isOnMoveHandle(along: point.x, across: point.y))
-
-        let hidden = model(edge: .right)
-        hidden.showsMoveHandle = false
-        XCTAssertTrue(hidden.moveHandlePoints.isEmpty)
-        XCTAssertFalse(hidden.isOnMoveHandle(along: point.x, across: point.y),
-                       "a hidden handle still took the press")
-
-        let withHandle = inkedFraction(try XCTUnwrap(render(shown)))
-        let withoutHandle = inkedFraction(try XCTUnwrap(render(hidden)))
-        XCTAssertLessThan(withoutHandle, withHandle, "the handle's arc was still drawn")
-    }
-
     /// A week nobody has spent yet still has to be visible.
     ///
     /// At 0% the arc has no length, so without a track behind it the ring is
@@ -700,12 +681,12 @@ final class AlwaysShowTests: XCTestCase {
     func testClickingTheNotchDoesNotUndoAlwaysShow() {
         let controller = NotchWindowController()
         controller.apply(.alwaysShow)
-        XCTAssertTrue(controller.model.staysOpen)
 
         controller.togglePinned()   // a click on the bar
-        XCTAssertTrue(controller.model.staysOpen,
+        XCTAssertTrue(controller.model.isAlwaysOn,
                       "a click downgraded Always show to hover")
         XCTAssertTrue(controller.model.isExpanded)
+        XCTAssertTrue(controller.model.isPinned)
     }
 
     /// However many times. The report said "sometimes", which is what a toggle
@@ -713,8 +694,10 @@ final class AlwaysShowTests: XCTestCase {
     func testItSurvivesRepeatedClicks() {
         let controller = NotchWindowController()
         controller.apply(.alwaysShow)
+
         for _ in 0..<5 { controller.togglePinned() }
-        XCTAssertTrue(controller.model.staysOpen)
+        XCTAssertTrue(controller.model.isAlwaysOn)
+        XCTAssertTrue(controller.model.isExpanded)
     }
 
     /// The transient pin still works where it is the only thing holding the
@@ -722,22 +705,13 @@ final class AlwaysShowTests: XCTestCase {
     func testAPinInHoverModeIsStillATogggle() {
         let controller = NotchWindowController()
         controller.apply(.onHover)
-        XCTAssertFalse(controller.model.staysOpen)
+
+        XCTAssertFalse(controller.model.isPinned)
 
         controller.togglePinned()
-        XCTAssertTrue(controller.model.staysOpen, "clicking no longer pins")
+        XCTAssertTrue(controller.model.isPinned, "clicking no longer pins")
         controller.togglePinned()
-        XCTAssertFalse(controller.model.staysOpen, "clicking no longer unpins")
-    }
-
-    /// Switching to hover has to clear a pin left over from before, or the
-    /// notch stays open and the new choice looks ignored.
-    func testSwitchingToHoverClearsAStalePin() {
-        let controller = NotchWindowController()
-        controller.apply(.onHover)
-        controller.togglePinned()
-        controller.apply(.onHover)
-        XCTAssertFalse(controller.model.staysOpen)
+        XCTAssertFalse(controller.model.isPinned, "clicking no longer unpins")
     }
 
     /// And so does hiding — a pinned notch that is ordered out still counts as
@@ -745,19 +719,50 @@ final class AlwaysShowTests: XCTestCase {
     func testHidingClearsBothHolds() {
         let controller = NotchWindowController()
         controller.apply(.alwaysShow)
+
+        // Both holds on at once (an edge case of clicking while always-on)
+        controller.togglePinned()
+
         controller.apply(.hidden)
-        XCTAssertFalse(controller.model.staysOpen)
+
+        XCTAssertFalse(controller.model.isPinned)
+        XCTAssertFalse(controller.model.isExpanded)
+    }
+
+    /// Switching to hover has to clear a pin left over from before, or the
+    /// notch stays open and the new choice looks ignored.
+    func testSwitchingToHoverClearsAStalePin() {
+        let controller = NotchWindowController()
+        controller.apply(.alwaysShow)
+        controller.togglePinned()
+
+        // Changing to hover should wipe the pin and close the notch.
+        controller.apply(.onHover)
+
+        XCTAssertFalse(controller.model.isPinned)
         XCTAssertFalse(controller.model.isExpanded)
     }
 
     /// Coming back from hover to always-on, with a stale pin in between.
+    ///
+    /// Choosing the setting subsumes the pin, so what is left afterwards is a
+    /// notch held open by Always show and nothing else — a later click is an
+    /// ordinary pin again, and the full-screen fold is not held off in between.
     func testAlwaysShowOutlastsAPinAndAnUnpin() {
         let controller = NotchWindowController()
         controller.apply(.onHover)
+
         controller.togglePinned()      // pinned by hand
+        XCTAssertTrue(controller.model.isPinned)
+
         controller.apply(.alwaysShow)  // then chosen in Settings
-        controller.togglePinned()      // and clicked again
-        XCTAssertTrue(controller.model.staysOpen)
+        XCTAssertFalse(controller.model.isPinned,
+                       "the setting subsumes the pin; a stale one would hold the full-screen fold off")
+        XCTAssertTrue(controller.model.isExpanded)
+
+        controller.togglePinned()      // a click is a fresh pin, not an unpin
+        XCTAssertTrue(controller.model.isAlwaysOn)
+        XCTAssertTrue(controller.model.isExpanded) // still stays open
     }
 }
 
@@ -792,6 +797,37 @@ final class StrayClickPinTests: XCTestCase {
         for _ in 0..<3 { controller.handleClick(at: .zero) }
         XCTAssertFalse(controller.model.isPinned)
         XCTAssertTrue(controller.model.isExpanded)
+    }
+
+    /// Reported as "the notch appears locked": the rings are small targets on a
+    /// screen edge, a click aimed at one lands beside it easily, and a click
+    /// that missed used to pin the notch. `isPinned` is drawn nowhere, so the
+    /// notch stopped folding with nothing on screen to say why or how to undo
+    /// it. Keep open lives on the right-click menu, which names it.
+    func testAClickThatMissesTheRingsOnAnOpenNotchDoesNotPin() {
+        let controller = NotchWindowController()
+        controller.show()
+        defer { controller.stop() }
+        controller.apply(.alwaysShow)   // open, with no rings to hit
+        XCTAssertTrue(controller.model.isExpanded)
+        XCTAssertFalse(controller.model.isPinned)
+
+        for _ in 0..<3 { controller.handleClick(at: .zero) }
+
+        XCTAssertFalse(controller.model.isPinned, "a click that missed the rings locked the notch open")
+    }
+
+    /// The menu still pins, so the gesture's removal took nothing away.
+    func testTheMenuStillPins() {
+        let controller = NotchWindowController()
+        controller.show()
+        defer { controller.stop() }
+        controller.apply(.onHover)
+
+        controller.togglePinned()
+        XCTAssertTrue(controller.model.isPinned)
+        controller.togglePinned()
+        XCTAssertFalse(controller.model.isPinned)
     }
 }
 
@@ -835,9 +871,12 @@ final class StaleAfterMarginTests: XCTestCase {
     /// that is the ordinary shape of an idle afternoon, not a fault.
     @MainActor
     func testOneFailedIdleAttemptDoesNotDimTheRing() async throws {
+        // The margin is generous on purpose: the assertion is about one failed
+        // attempt, not about timing, and 0.45s was close enough to the 0.2s
+        // sleep that a loaded CI runner crossed it.
         let store = UsageStore(
             providers: [FailingProvider()],
-            refreshInterval: 0.05, idleRefreshInterval: 0.15, staleAfter: 0.45,
+            refreshInterval: 0.05, idleRefreshInterval: 0.15, staleAfter: 3,
             archive: UsageArchive(defaults: defaults())
         )
         await store.refresh()
@@ -897,6 +936,8 @@ final class PhysicalPanelIntegrationTests: XCTestCase {
                     switch edge {
                     case .left: XCTAssertEqual(frame.minX, screen.frame.minX, accuracy: 1)
                     case .right: XCTAssertEqual(frame.maxX, screen.frame.maxX, accuracy: 1)
+                    // On the bezel on every edge. Where there is a cutout the
+                    // top notch clears it sideways, not by dropping.
                     case .top: XCTAssertEqual(frame.maxY, screen.frame.maxY, accuracy: 1)
                     case .bottom: XCTAssertEqual(frame.minY, screen.frame.minY, accuracy: 1)
                     }
@@ -909,6 +950,131 @@ final class PhysicalPanelIntegrationTests: XCTestCase {
                     }
                 }
             }
+        }
+    }
+}
+
+/// Every edge obeys the one size setting, including the top.
+@MainActor
+final class EverySizeSettingAppliesEverywhereTests: XCTestCase {
+    /// **The setting survives the edge it cannot be seen on.**
+    ///
+    /// There was an override here that lost it: the top edge drew at a fixed
+    /// size *and overwrote the setting with it*, so moving back to a side edge
+    /// kept the size the hardware had imposed, and the rings, the arc and the
+    /// tooltip all changed at once. Two sizes is what "not consistent" was.
+    ///
+    /// Merged into the display's own cutout the top edge is the size of that
+    /// cutout — one shape cannot be two thicknesses — but that is now a scale it
+    /// is *drawn* at, not a value written back over the user's. Whatever is
+    /// chosen while the notch is on the hardware edge is exactly what it is when
+    /// it arrives on any other.
+    func testTheSizeSettingSurvivesTheHardwareEdge() throws {
+        guard NSScreen.screens.contains(where: { $0.hardwareNotch != nil }) else {
+            throw XCTSkip("Needs a display with a notch")
+        }
+        let controller = NotchWindowController()
+        controller.model.updateSnapshots(Fixtures.snapshots())
+        defer { controller.stop() }
+
+        controller.apply(edge: .top)
+        controller.relocate()
+        controller.apply(scale: 0.75)
+        XCTAssertEqual(controller.model.requestedScale, 0.75, accuracy: 0.001,
+                       "the top edge overwrote the setting again")
+        XCTAssertNotNil(controller.model.mergedScale,
+                        "on the hardware edge the cutout is what sets the size")
+
+        controller.model.edge = .right
+        controller.relocate()
+        XCTAssertNil(controller.model.mergedScale, "a side edge has no cutout to follow")
+        XCTAssertEqual(controller.model.sizeScale, 0.75, accuracy: 0.001,
+                       "the size the user chose did not survive the move")
+    }
+}
+
+/// The arc that hugged a corner is gone with the layout that had one. Beside
+/// the display's cutout the notch used to be a flat bar whose far corner was
+/// convex, so the settings orb hung off it and its resting arc traced it. The
+/// notch is the same shape on every edge now and the orb nestles in the far
+/// flare's pocket, which `SettingsOrbTests` covers.
+
+/// **The panel is relaid out when the notch reopens after an edge change.**
+///
+/// Reported as the settings arc sitting far from the bar and the tooltip
+/// pointing wide of its ring — but only after moving the notch between edges,
+/// never on a fresh launch.
+///
+/// `apply(edge:)` folds the notch, relocates, then a beat later opens it again.
+/// Without a second relocate the window keeps the size the *folded* notch
+/// needed. The shape centres itself on the panel it is in, while the orb and
+/// the tooltip are placed from `slack` — so a panel that is too narrow slides
+/// the shape left and leaves everything hung off it behind.
+@MainActor
+final class PanelFollowsTheNotchAfterAnEdgeChangeTests: XCTestCase {
+    private func settle(_ seconds: TimeInterval) {
+        let until = Date().addingTimeInterval(seconds)
+        while Date() < until {
+            RunLoop.current.run(mode: .default, before: Date().addingTimeInterval(0.02))
+        }
+    }
+
+    func testThePanelMatchesTheModelAfterMovingRoundTheEdges() throws {
+        guard NSScreen.screens.contains(where: { $0.hardwareNotch != nil }) else {
+            throw XCTSkip("Needs a display with a notch")
+        }
+        let controller = NotchWindowController()
+        controller.model.updateSnapshots(Array(Fixtures.snapshots().prefix(3)))
+        controller.apply(edge: .top)
+        controller.model.isExpanded = true
+        controller.relocate()
+        defer { controller.stop() }
+
+        let fresh = try XCTUnwrap(controller.panelContentViewForTesting?.window?.frame.width)
+        XCTAssertEqual(fresh, controller.model.panelSize.width, accuracy: 1,
+                       "a freshly placed notch already disagrees with its panel")
+
+        // The animated path, the way the edge picker drives it.
+        for edge in [NotchEdge.right, .bottom, .left, .top] {
+            controller.apply(edge: edge)
+            settle(0.6)
+        }
+
+        let after = try XCTUnwrap(controller.panelContentViewForTesting?.window?.frame.width)
+        XCTAssertEqual(after, controller.model.panelSize.width, accuracy: 1,
+                       "after the round trip the panel is \(after)pt where the notch "
+                       + "needs \(controller.model.panelSize.width)pt — the shape will "
+                       + "sit \((controller.model.panelSize.width - after) / 2)pt off "
+                       + "everything placed from slack")
+        XCTAssertEqual(after, fresh, accuracy: 1,
+                       "the notch is a different size after moving than it was at launch")
+    }
+}
+
+/// Settings that change the notch's size have to relay the window out with it.
+@MainActor
+final class ReadingToggleRelaysThePanelOutTests: XCTestCase {
+    /// Beside the hardware the reading is paid for out of ring size, so
+    /// turning it on changes the strip's length and the window around it. Set
+    /// without relocating, the window kept its old width and the shape — which
+    /// centres itself in it — slid away from the settings arc and the tooltip.
+    func testTogglingTheReadingKeepsThePanelWithTheNotch() throws {
+        guard NSScreen.screens.contains(where: { $0.hardwareNotch != nil }) else {
+            throw XCTSkip("Needs a display with a notch")
+        }
+        let controller = NotchWindowController()
+        controller.model.updateSnapshots(Array(Fixtures.snapshots().prefix(3)))
+        controller.apply(edge: .top)
+        controller.model.isExpanded = true
+        controller.apply(showsNotchReadings: false)
+        defer { controller.stop() }
+
+        for on in [true, false, true] {
+            controller.apply(showsNotchReadings: on)
+            let panel = try XCTUnwrap(controller.panelContentViewForTesting?.window?.frame.width)
+            XCTAssertEqual(panel, controller.model.panelSize.width, accuracy: 1,
+                           "with readings \(on ? "on" : "off") the panel is \(panel)pt "
+                           + "where the notch needs \(controller.model.panelSize.width)pt")
         }
     }
 }

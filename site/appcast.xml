@@ -3,12 +3,22 @@
     <channel>
         <title>Codenotch</title>
         <item>
-            <title>1.12.0</title>
-            <pubDate>Wed, 09 Sep 2026 09:56:29 +0700</pubDate>
-            <sparkle:version>14</sparkle:version>
-            <sparkle:shortVersionString>1.12.0</sparkle:shortVersionString>
+            <title>1.20.0</title>
+            <pubDate>Wed, 30 Sep 2026 10:54:07 +0700</pubDate>
+            <sparkle:version>22</sparkle:version>
+            <sparkle:shortVersionString>1.20.0</sparkle:shortVersionString>
             <sparkle:minimumSystemVersion>15.0</sparkle:minimumSystemVersion>
-            <enclosure url="https://hivinz.com/Codenotch.dmg" length="10654287" type="application/octet-stream" sparkle:edSignature="pFH+ocy302A/2XyBXYEnPJiGcCxlXI7GWJTCYu4VvMbSsBrBxs5E5bAItUs9/yDiLdxpmWPnPJ7k/ljMZjcTCg=="/>
+            <description><![CDATA[<p>See what each project spent of your allowance, and figures that keep up while you work.</p>
+<ul>
+<li><b>Cost per project.</b> A new Costs section shows what each project spent of each login's allowance, by day, week and month.</li>
+<li><b>Figures that keep up:</b> read fresh while a session works, with a countdown that follows the clock.</li>
+<li><b>A menu bar item as wide as what it says.</b></li>
+<li><b>Abacus.AI credits</b> for custom endpoints.</li>
+<li><b>OpenCode and Grok stay signed in.</b></li>
+<li><b>Polished Português do Brasil.</b></li>
+</ul>
+]]></description>
+            <enclosure url="https://hivinz.com/Codenotch-1.20.0.dmg" length="12388255" type="application/octet-stream" sparkle:edSignature="zsi0dgSbvq2ghgWz5Ojh9CSikhKW9mdxHhzl1B4CgHWbZViD9dZzgHEKtHcAbatKZXxAqw4bhobamTTLfuSPAg=="/>
         </item>
     </channel>
 </rss>

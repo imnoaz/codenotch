@@ -84,6 +84,17 @@ enum Percent {
         return small(value)
     }
 
+    /// One percentage with no decimals, for the menu bar, where a tenth is
+    /// noise at a glance. Rounding never lands on the two figures that would
+    /// say something else happened: "0" when a little has been used, or "100"
+    /// while there is still room.
+    static func whole(for fraction: Double) -> String {
+        let value = max(0, fraction * 100)
+        if value > 0, value < 1 { return "<1" }
+        if value > 99, value < 100 { return "99" }
+        return "\(Int(value.rounded()))"
+    }
+
     private static func small(_ value: Double) -> String {
         if value <= 0 { return "0" }
         let tenths = (value * 10).rounded() / 10
@@ -122,11 +133,14 @@ struct LimitWindow: Identifiable, Codable, Equatable {
 
     /// Exact cycle length when known; optional to keep older archives readable.
     let duration: TimeInterval?
+    var bandOverride: UsageBand? = nil
+    var prefersUsedText: Bool = false
 
     init(id: String, group: String? = nil, label: String, usedFraction: Double? = nil,
          remaining: Int? = nil, used: Int? = nil, usedText: String? = nil, detail: String? = nil,
          money: UsageMoneyBreakdown? = nil, resetsAt: Date? = nil,
-         duration: TimeInterval? = nil) {
+         duration: TimeInterval? = nil, bandOverride: UsageBand? = nil,
+         prefersUsedText: Bool = false) {
         self.id = id
         self.group = group
         self.label = label
@@ -138,6 +152,59 @@ struct LimitWindow: Identifiable, Codable, Equatable {
         self.money = money
         self.resetsAt = resetsAt
         self.duration = duration
+        self.bandOverride = bandOverride
+        self.prefersUsedText = prefersUsedText
+    }
+
+    enum CodingKeys: String, CodingKey {
+        case id, group, label, usedFraction, remaining, used, detail, money, usedText, resetsAt, duration, bandOverride, prefersUsedText
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        self.id = try container.decode(String.self, forKey: .id)
+        self.group = try container.decodeIfPresent(String.self, forKey: .group)
+        self.label = try container.decode(String.self, forKey: .label)
+        self.usedFraction = try container.decodeIfPresent(Double.self, forKey: .usedFraction)
+        self.remaining = try container.decodeIfPresent(Int.self, forKey: .remaining)
+        self.used = try container.decodeIfPresent(Int.self, forKey: .used)
+        self.detail = try container.decodeIfPresent(String.self, forKey: .detail)
+        self.money = try container.decodeIfPresent(UsageMoneyBreakdown.self, forKey: .money)
+        self.usedText = try container.decodeIfPresent(String.self, forKey: .usedText)
+        self.resetsAt = try container.decodeIfPresent(Date.self, forKey: .resetsAt)
+        self.duration = try container.decodeIfPresent(TimeInterval.self, forKey: .duration)
+        self.bandOverride = try container.decodeIfPresent(UsageBand.self, forKey: .bandOverride)
+        self.prefersUsedText = try container.decodeIfPresent(Bool.self, forKey: .prefersUsedText) ?? false
+    }
+
+    func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(id, forKey: .id)
+        try container.encodeIfPresent(group, forKey: .group)
+        try container.encode(label, forKey: .label)
+        try container.encodeIfPresent(usedFraction, forKey: .usedFraction)
+        try container.encodeIfPresent(remaining, forKey: .remaining)
+        try container.encodeIfPresent(used, forKey: .used)
+        try container.encodeIfPresent(detail, forKey: .detail)
+        try container.encodeIfPresent(money, forKey: .money)
+        try container.encodeIfPresent(usedText, forKey: .usedText)
+        try container.encodeIfPresent(resetsAt, forKey: .resetsAt)
+        try container.encodeIfPresent(duration, forKey: .duration)
+        try container.encodeIfPresent(bandOverride, forKey: .bandOverride)
+        if prefersUsedText {
+            try container.encode(prefersUsedText, forKey: .prefersUsedText)
+        }
+    }
+
+    /// Whether this is a rolling five-hour window — the limit a coding session
+    /// runs into first. Read from the length the provider reported rather than
+    /// from an id, because every vendor names it differently: Claude's
+    /// `session`, Codex's `primary`, Kimi's `rolling`.
+    var isFiveHour: Bool {
+        guard let duration else { return false }
+        // A minute's slack: some vendors send the window as a start and an
+        // end, and the difference is not always a whole number of seconds.
+        return abs(duration - 5 * 3600) < 60
     }
 
     /// A count short enough to sit inside a 44 pt ring.
@@ -212,7 +279,9 @@ struct UsageBlock: Equatable {
 
 struct ProviderSnapshot: Identifiable, Equatable {
     let id: String
-    let displayName: String
+    /// The provider's own name, or the one chosen for the account in
+    /// Settings; the store swaps it in before anything reads the snapshot.
+    var displayName: String
     let glyph: ProviderGlyph
     let fidelity: Fidelity
     var status: ProviderStatus
@@ -247,6 +316,7 @@ struct ProviderSnapshot: Identifiable, Equatable {
     /// A model cell has its own display preference, but polling belongs to the
     /// runtime that supplied it.
     var sourceProviderID: String?
+    var customIconFilename: String?
 
     var providerID: String { sourceProviderID ?? id }
 
@@ -270,12 +340,27 @@ struct ProviderSnapshot: Identifiable, Equatable {
     /// the tooltip title. Nil when there is nothing to name.
     var plan: String? = nil
 
-    /// Unused rate-limit resets on this Codex account, listed by the same
-    /// backend as usage.
-    var resetCredits: CodexResetCredits? = nil
+    /// Unused rate-limit resets reported for this account.
+    var resetCredits: UsageResetCredits? = nil
+
+    /// Whether the tooltip has a reset-credit section to draw.
+    ///
+    /// The endpoint can successfully return an empty result. That is data,
+    /// but it is not useful card content and must not reserve layout space.
+    var hasAvailableResetCredits: Bool {
+        availableResetCredits(at: Date()) != nil
+    }
+    func availableResetCredits(at now: Date) -> UsageResetCredits? {
+        guard let credits = resetCredits?.unexpired(at: now), credits.availableCount > 0 else { return nil }
+        return credits
+    }
+
     /// Provider-owned online usage detail, such as DeepSeek's API key/model
     /// breakdown and daily token/cost series.
     var usageDetail: ProviderUsageDetail? = nil
+
+    /// Locally sampled cumulative token usage for a custom endpoint.
+    var customUsageHistory: [CustomEndpointUsageDay]? = nil
 
     /// The number on the cell: the provider's declared primary window — for
     /// Claude, the current session.
@@ -294,6 +379,32 @@ struct ProviderSnapshot: Identifiable, Equatable {
     }
 
     var usedFraction: Double? { headline?.usedFraction }
+    var bandOverride: UsageBand? { headline?.bandOverride }
+
+    /// The five-hour window, where the provider has one: the headline when it
+    /// is that window, otherwise the account's own.
+    ///
+    /// Found by length rather than taken from the headline, because the
+    /// headline is not always it — the daily pace ring takes Claude's. Never
+    /// a grouped window, though: a group is one model's or one feature's
+    /// allowance, Codex's Spark for one, kept off the ring for the same reason
+    /// it cannot stand for the account here.
+    var fiveHourWindow: LimitWindow? {
+        if let headline, headline.isFiveHour { return headline }
+        return windows.first { $0.isFiveHour && $0.group == nil }
+    }
+
+    /// The provider-declared weekly allowance, whether or not another surface
+    /// is already using it as its headline.
+    ///
+    /// Kept separate from `weeklyWindow`: the notch deliberately suppresses a
+    /// duplicate second ring when the weekly allowance is already its headline,
+    /// while compact summaries still need to know that a valid weekly reading
+    /// exists alongside their own five-hour figure.
+    var weeklyLimitWindow: LimitWindow? {
+        guard let weeklyID else { return nil }
+        return windows.first { $0.id == weeklyID }
+    }
 
     /// The window the second ring draws, when one is switched on.
     ///
@@ -306,14 +417,14 @@ struct ProviderSnapshot: Identifiable, Equatable {
     /// Nil means this provider has no second window worth a ring, which is a
     /// real answer rather than a missing one.
     var weeklyWindow: LimitWindow? {
-        guard let weeklyID else { return nil }
+        guard let weeklyLimitWindow else { return nil }
         // Never the window the headline is already drawing. Providers that pick
         // their headline by which limit is tightest — Antigravity does — will
         // sometimes land on the weekly one, and two rings reporting the same
         // number is worse than one: it reads as a second fact that happens to
         // agree, rather than as the same fact twice.
         guard weeklyID != headlineID else { return nil }
-        return windows.first { $0.id == weeklyID }
+        return weeklyLimitWindow
     }
 
     /// Nil when there is no weekly window, or when the provider reports one
@@ -326,6 +437,7 @@ struct ProviderSnapshot: Identifiable, Equatable {
             return showsLocalPerformance ? (localPerformance?.headlineText ?? "— tok/s")
                 : (localModel?.memoryText ?? "—")
         }
+        if headline?.prefersUsedText == true, let usedText = headline?.usedText { return usedText }
         if let usedFraction { return Percent.text(for: usedFraction) + "%" }
         if let remaining = headline?.remaining { return LimitWindow.compact(remaining) }
         if let usedText = headline?.usedText { return usedText }
@@ -369,15 +481,22 @@ struct ProviderSnapshot: Identifiable, Equatable {
         case "cursor":     return L10n.t("Sign in to Cursor in the editor", locale: locale)
         case "codex":      return L10n.t("Sign in to Codex to read your usage", locale: locale)
         case "deepseek":   return L10n.t("Sign in to DeepSeek Platform to read your usage", locale: locale)
+        case "qianwenai":  return L10n.t("Sign in to QianwenAI to read your Token Plan usage", locale: locale)
         case _ where CodexProfile.slug(fromProviderID: id) != nil:
             let slug = CodexProfile.slug(fromProviderID: id)!
             return L10n.t("Sign in to Codex in ~/.codex-\(slug) to read your usage", locale: locale)
         case "gemini":     return L10n.t("Sign in to Antigravity to read your usage", locale: locale)
+        case _ where AntigravityProfile.slug(fromProviderID: id) != nil:
+            let slug = AntigravityProfile.slug(fromProviderID: id)!
+            return L10n.t("Sign in to Antigravity in ~/.gemini/antigravity-\(slug) to read your usage", locale: locale)
         case "glm":        return L10n.t("Set up a GLM Coding Plan key for a coding tool to read your usage", locale: locale)
         case "copilot":    return L10n.t("Sign in with GitHub CLI to read your Copilot usage", locale: locale)
         case "opencode":   return L10n.t("Connect the Go plan in OpenCode to read your usage", locale: locale)
         case "commandcode": return L10n.t("Sign in with the Command Code app to read your usage", locale: locale)
         case "kiro":       return L10n.t("Sign in with kiro-cli to read your usage", locale: locale)
+        case "amp":        return L10n.t("Run amp login in Terminal to read your usage", locale: locale)
+        case "apify":      return L10n.t("Run apify login in Terminal, or paste an Apify API token in Settings", locale: locale)
+        case "kilo":       return L10n.t("Sign in with the Kilo CLI to read your usage", locale: locale)
         // Two Ollamas, and they are stuck for different reasons: the hosted
         // one wants a key, the local one wants the daemon running.
         case "ollama":       return L10n.t("Enter an Ollama API key in Settings, or export OLLAMA_API_KEY", locale: locale)

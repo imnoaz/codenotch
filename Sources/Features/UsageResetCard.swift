@@ -10,14 +10,31 @@ struct UsageResetCard: View {
     @Environment(\.codenotchAccentColor) private var accentColor
     @Environment(\.codenotchReduceTransparency) private var reduceTransparency
     @Environment(\.notchSurfaceStyle) private var surfaceStyle
+    @Environment(\.colorScheme) private var colorScheme
 
     static let cardHeight: CGFloat = Design.px(210)
 
     private var glassy: Bool { surfaceStyle.isGlass && !reduceTransparency }
+    private var secondaryInk: Color {
+        TooltipGlassContrast.secondaryInk(surfaceStyle: surfaceStyle, colorScheme: colorScheme,
+                                          reduceTransparency: reduceTransparency)
+    }
     /// Clear on glass: anything of ours under it would override the Clear or
     /// Tinted choice in Appearance settings. `darkGlass` is the one deliberate
     /// exception, and its dim is drawn behind the glass itself, not here.
     private var surfaceFill: Color { glassy ? .clear : Palette.card }
+
+    private var clampedTailOffset: CGFloat {
+        let size = TooltipTail.size(for: direction)
+        switch direction {
+        case .leading, .trailing:
+            let maxOffset = max(0, (Self.cardHeight / 2) - NotchLayout.cardCorner - (size.height / 2))
+            return min(max(tailOffset, -maxOffset), maxOffset)
+        case .up, .down:
+            let maxOffset = max(0, (NotchLayout.cardWidth / 2) - NotchLayout.cardCorner - (size.width / 2))
+            return min(max(tailOffset, -maxOffset), maxOffset)
+        }
+    }
 
     var body: some View {
         stack
@@ -27,10 +44,12 @@ struct UsageResetCard: View {
                 if glassy {
                     if #available(macOS 26.0, *) {
                         Color.clear
-                            .glassEffect(surfaceStyle.glass, in: TooltipSilhouette(direction: direction, tailOffset: tailOffset))
+                            .glassEffect(surfaceStyle.glass, in: TooltipSilhouette(direction: direction, tailOffset: clampedTailOffset))
                             .background {
-                                if let dim = surfaceStyle.glassDim {
-                                    TooltipSilhouette(direction: direction, tailOffset: tailOffset).fill(dim)
+                                if let dim = TooltipGlassContrast.dim(surfaceStyle: surfaceStyle,
+                                                                      colorScheme: colorScheme,
+                                                                      reduceTransparency: reduceTransparency) {
+                                    TooltipSilhouette(direction: direction, tailOffset: clampedTailOffset).fill(dim)
                                 }
                             }
                     }
@@ -39,6 +58,7 @@ struct UsageResetCard: View {
     }
 
     private var titleText: String {
+        if let notice = event.noticeTitle { return notice }
         switch event.kind {
         case .reset:
             return L10n.t("\(event.providerName) Reset")
@@ -50,6 +70,7 @@ struct UsageResetCard: View {
     }
 
     private var subtitleText: String {
+        if let notice = event.noticeSubtitle { return notice }
         switch event.kind {
         case .reset:
             return L10n.t("\(event.windowLabel) limit refreshed")
@@ -68,6 +89,7 @@ struct UsageResetCard: View {
     }
 
     private var statusText: String {
+        if let notice = event.noticeStatus { return notice }
         switch event.kind {
         case .reset:
             return L10n.t("Quota is available (0% used)")
@@ -111,7 +133,7 @@ struct UsageResetCard: View {
                                 Button(action: onDismiss) {
                                     Image(systemName: "xmark")
                                         .font(.system(size: 11, weight: .bold))
-                                        .foregroundStyle(Palette.textSecondary)
+                                        .foregroundStyle(secondaryInk)
                                         .frame(width: 16, height: 16)
                                 }
                                 .buttonStyle(.plain)
@@ -120,7 +142,7 @@ struct UsageResetCard: View {
 
                         Text(subtitleText)
                             .font(Typography.cardBody)
-                            .foregroundStyle(Palette.textSecondary)
+                            .foregroundStyle(secondaryInk)
                             .lineLimit(1)
                     }
                 }
@@ -142,7 +164,7 @@ struct UsageResetCard: View {
                 if let resetsAt = event.resetsAt {
                     Text("\(resetTimePrefix) \(resetsAt.formatted(date: .omitted, time: .shortened))")
                         .font(Typography.cardBody)
-                        .foregroundStyle(Palette.textSecondary)
+                        .foregroundStyle(secondaryInk)
                         .lineLimit(1)
                         .padding(.top, Design.px(8))
                 }
@@ -165,8 +187,8 @@ struct UsageResetCard: View {
         return TooltipTail(direction: direction)
             .fill(surfaceFill)
             .frame(width: size.width, height: size.height)
-            .offset(x: direction == .up || direction == .down ? tailOffset : 0,
-                    y: direction == .leading || direction == .trailing ? tailOffset : 0)
+            .offset(x: direction == .up || direction == .down ? clampedTailOffset : 0,
+                    y: direction == .leading || direction == .trailing ? clampedTailOffset : 0)
     }
 
     @ViewBuilder private var stack: some View {

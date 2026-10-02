@@ -2,7 +2,8 @@ import XCTest
 @testable import Codenotch
 
 /// The reader keeps its place in the rollout between ticks; what matters is
-/// that it still says what reading the whole file would.
+/// that it says what the bounded scan would on the first read, and what
+/// reading the whole file would for every line added after it.
 final class CodexRolloutReaderTests: XCTestCase {
     private let started = #"{"type":"event_msg","payload":{"type":"task_started"}}"#
     private let complete = #"{"type":"event_msg","payload":{"type":"task_complete"}}"#
@@ -112,6 +113,31 @@ final class CodexRolloutReaderTests: XCTestCase {
         let url = file()
         try write(started + "\n" + noise + "\n", to: url)
         XCTAssertEqual(CodexRolloutReader().state(from: url), .busy)
+    }
+
+    /// A line of `bytes` that parses but is no lifecycle event.
+    private func filler(_ bytes: Int) -> String {
+        #"{"pad":""# + String(repeating: "x", count: bytes - 11) + #""}"# + "\n"
+    }
+
+    func testTheFirstReadOfALargeFileIsBoundedAndLaterLinesAreFoldedIn() throws {
+        let url = file()
+        let reader = CodexRolloutReader()
+        try write(complete + "\n" + filler(4 * 256 * 1024 + 100), to: url)
+        XCTAssertNil(reader.state(from: url), "an event beyond the bounded scan is not read on the first pass")
+        try append(started + "\n", to: url)
+        XCTAssertEqual(reader.state(from: url), .busy)
+        try append(complete + "\n", to: url)
+        XCTAssertEqual(reader.state(from: url), .success)
+    }
+
+    func testALargeFileWithAHalfWrittenTailResumesAtTheTail() throws {
+        let url = file()
+        let reader = CodexRolloutReader()
+        try write(filler(300 * 1024) + started + "\n" + #"{"type":"event_msg","payload":{"type":"task_comp"#, to: url)
+        XCTAssertEqual(reader.state(from: url), .busy)
+        try append(#"lete"}}"# + "\n", to: url)
+        XCTAssertEqual(reader.state(from: url), .success)
     }
 
     func testAMissingFileReadsAsNothing() {

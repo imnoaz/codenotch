@@ -51,7 +51,7 @@ final class GrokUsageTests: XCTestCase {
     }
 
     /// `creditUsagePercent` is absent; the product array is the reading. The
-    /// ring is still declared as `headlineID: "credits"`.
+    /// ring is still declared as both the headline and weekly allowance.
     func testProductOnlyCreditsStillUseTheHeadlineID() throws {
         let productOnly = """
         {"config":{"productUsage":[{"product":"GrokBuild","usagePercent":33.0}],\
@@ -64,9 +64,11 @@ final class GrokUsageTests: XCTestCase {
         XCTAssertEqual(credits.usedFraction ?? -1, 0.33, accuracy: 0.0001)
         let snap = ProviderSnapshot(
             id: "grok", displayName: "Grok", glyph: .grok,
-            fidelity: .official, status: .ok, windows: w, headlineID: "credits"
+            fidelity: .official, status: .ok, windows: w,
+            headlineID: "credits", weeklyID: "credits"
         )
         XCTAssertEqual(snap.headline?.id, "credits")
+        XCTAssertEqual(snap.weeklyLimitWindow?.id, "credits")
         XCTAssertEqual(snap.usedFraction ?? -1, 0.33, accuracy: 0.0001)
     }
 
@@ -103,5 +105,14 @@ final class GrokUsageTests: XCTestCase {
 
     func testHumanizesTheProductNameTheWayTheModalWritesIt() {
         XCTAssertEqual(GrokUsage.humanize("GrokBuild"), "Grok Build")
+    }
+
+    /// The issuer is compared whole: a host that merely begins with
+    /// `auth.x.ai` is someone else's, and its token must not be sent to xAI.
+    func testALookalikeIssuerIsNotTrusted() {
+        XCTAssertFalse(GrokCredentials.isTrusted(key: "https://auth.x.ai.example.com::cli", entry: [:]))
+        XCTAssertFalse(GrokCredentials.isTrusted(key: "https://auth.x.aix::cli", entry: [:]))
+        XCTAssertTrue(GrokCredentials.isTrusted(key: "https://auth.x.ai::cli", entry: [:]))
+        XCTAssertTrue(GrokCredentials.isTrusted(key: "https://auth.x.ai", entry: [:]))
     }
 }

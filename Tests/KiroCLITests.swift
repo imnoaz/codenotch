@@ -101,8 +101,32 @@ final class KiroCLITests: XCTestCase {
         try "#!/bin/sh\necho usage-ok\n".write(to: url, atomically: true, encoding: .utf8)
         try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: url.path)
 
-        let text = try KiroCLI.run(binary: url, timeout: 2)
+        // Generous: this is about stdout, not speed, and a script written a
+        // moment ago is scanned by the system on its first launch, which on
+        // a busy machine can take longer than a couple of seconds.
+        let text = try KiroCLI.run(binary: url, timeout: 15)
         XCTAssertEqual(text.trimmingCharacters(in: .whitespacesAndNewlines), "usage-ok")
+    }
+
+    /// kiro-cli 2.21 prints the /usage card to stderr and nothing to stdout
+    /// (#220); it was read as "no usage".
+    func testACardPrintedToStderrIsRead() throws {
+        let url = try makeTemp().appendingPathComponent("kiro-cli")
+        try "#!/bin/sh\necho 'Estimated Usage | resets on 2026-10-01 | KIRO PRO+' >&2\n"
+            .write(to: url, atomically: true, encoding: .utf8)
+        try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: url.path)
+
+        let text = try KiroCLI.run(binary: url, timeout: 15)
+        XCTAssertTrue(text.contains("Estimated Usage"), text)
+    }
+
+    func testTheStreamWithTheCardWinsOverStrayOutput() {
+        XCTAssertEqual(KiroCLI.usageText(stdout: "warning: update available\n", stderr: "Estimated Usage | x"),
+                       "Estimated Usage | x")
+        XCTAssertEqual(KiroCLI.usageText(stdout: "Estimated Usage | y", stderr: "warning\n"),
+                       "Estimated Usage | y")
+        XCTAssertEqual(KiroCLI.usageText(stdout: "  \n", stderr: "something else"), "something else")
+        XCTAssertNil(KiroCLI.usageText(stdout: "", stderr: " \n"))
     }
 
     // MARK: - Fixtures

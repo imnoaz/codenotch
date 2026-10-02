@@ -208,11 +208,25 @@ final class ClaudeTokenRefresher: ObservableObject {
     /// end-of-input, so it starts up, renews, and refuses for want of a prompt.
     /// Output goes nowhere — there is nothing in it worth keeping, and a token
     /// could in principle be echoed into it.
+    /// Contained the way `ClaudeUsageCLI` is (#227). Without these the run
+    /// started every MCP server and hook the user had configured, from
+    /// whatever directory the app was launched in — `/` from Finder — and
+    /// macOS put their reads of Desktop, Documents, Downloads and network
+    /// volumes to the user as Codenotch asking for access.
+    static let arguments = ["-p", "--no-session-persistence", "--strict-mcp-config"]
+
     static func run(_ cli: URL, timeout: TimeInterval) throws
         -> (pid: Int32, exit: () async -> Int32?) {
         let process = Process()
         process.executableURL = cli
-        process.arguments = ["-p"]
+        process.arguments = Self.arguments
+        // The same fixed directory `/usage` runs from, never the app's own.
+        if let scratch = try? ClaudeUsageCLI.scratchDirectory() {
+            process.currentDirectoryURL = scratch
+            var environment = ProcessInfo.processInfo.environment
+            environment["PWD"] = scratch.path
+            process.environment = environment
+        }
         process.standardInput = FileHandle.nullDevice
         process.standardOutput = FileHandle.nullDevice
         process.standardError = FileHandle.nullDevice

@@ -174,7 +174,7 @@ enum AntigravityQuotaParser {
             windows.append(window)
         }
         if let window = self.aggregate(
-            geminiWeekly, id: "gemini-weekly", group: "Gemini Models", label: "Weekly Limit", weekly: true)
+            geminiWeekly, id: "gemini-weekly", group: "Gemini Models", label: L10n.t("Weekly Limit"), weekly: true)
         {
             windows.append(window)
         }
@@ -184,7 +184,7 @@ enum AntigravityQuotaParser {
             windows.append(window)
         }
         if let window = self.aggregate(
-            thirdPartyWeekly, id: "3p-weekly", group: "Claude and GPT models", label: "Weekly Limit", weekly: true)
+            thirdPartyWeekly, id: "3p-weekly", group: "Claude and GPT models", label: L10n.t("Weekly Limit"), weekly: true)
         {
             windows.append(window)
         }

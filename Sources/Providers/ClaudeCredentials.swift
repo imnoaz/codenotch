@@ -203,22 +203,36 @@ final class ClaudeKeychain: @unchecked Sendable {
 
     private let reader: (_ services: [String], _ interactive: Bool) throws -> ClaudeCredentials
     private let prompt: PromptPermission
+    private let refusal: KeychainRefusal
 
     /// How long an unanswered "Allow access…" stays good for.
     static let promptWindow = PromptPermission.window
 
     init(services: [String],
          now: @escaping () -> Date = Date.init,
+         refusals: UserDefaults? = nil,
          reader: @escaping (_ services: [String], _ interactive: Bool) throws -> ClaudeCredentials
             = { try ClaudeCredentials.read(services: $0, interactive: $1) }) {
         self.services = services
         self.prompt = PromptPermission(now: now)
+        self.refusal = KeychainRefusal(key: services.first ?? "claude", defaults: refusals)
         self.reader = reader
     }
 
+    /// The app's preferences in the app. Under test the host *is* the
+    /// installed app, so its real answer would decide what the tests read.
     convenience init(profile: ClaudeProfile) {
-        self.init(services: profile.keychainServices)
+        self.init(services: profile.keychainServices,
+                  refusals: Runtime.isUnderTest ? nil : .standard)
     }
+
+    /// The person said no to this login and has not asked again. While true,
+    /// nothing reads it — not the keychain, not the security tool, and not the
+    /// sources that never needed the keychain either; see `ClaudeOAuthProvider`.
+    var isRefused: Bool { refusal.isRefused && !prompt.isOwed }
+
+    /// "Allow access…" was clicked and its read has not happened yet.
+    var isAskingAgain: Bool { prompt.isOwed }
 
     /// The default profile's reader, shared so that every caller that predates
     /// profiles keeps sharing one cache — and so one prompt. Uses the default
@@ -230,9 +244,23 @@ final class ClaudeKeychain: @unchecked Sendable {
     /// job, because "signed out" and "the token has aged out overnight" call for
     /// different behaviour and only one of them is worth alarming anyone about.
     func load() throws -> ClaudeCredentials {
-        try cache.value(
+        if isRefused { throw UsageProviderError.accessDenied }
+        return try cache.value(
             itemModifiedAt: { KeychainItem.modifiedAt(services: services) },
-            reload: { [self] in try reader(services, prompt.take()) }
+            reload: { [self] in
+                let interactive = prompt.take()
+                do {
+                    let credentials = try reader(services, interactive)
+                    // Answered with Allow: the earlier no no longer stands.
+                    if interactive { refusal.set(false) }
+                    return credentials
+                } catch UsageProviderError.accessDenied where interactive {
+                    // Only the dialogue's own answer is recorded. A background
+                    // read refused without asking is not anyone saying no.
+                    refusal.set(true)
+                    throw UsageProviderError.accessDenied
+                }
+            }
         )
     }
 

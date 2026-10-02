@@ -18,6 +18,14 @@ pub fn start(app: AppHandle, port: u16) {
         for mut req in server.incoming_requests() {
             let url = req.url().to_string();
             if url.starts_with("/event") {
+                // codenotch-hook only ever POSTs. A GET is also what a web page can send with no
+                // Origin header at all (an image tag), so nothing but POST is taken (#165).
+                if *req.method() != tiny_http::Method::Post {
+                    let _ = req.respond(
+                        tiny_http::Response::from_string("method not allowed").with_status_code(405),
+                    );
+                    continue;
+                }
                 // Cross-Origin / CSRF protection:
                 // Reject untrusted browser requests attempting to forge events or poison local state.
                 if is_forbidden(&req) {

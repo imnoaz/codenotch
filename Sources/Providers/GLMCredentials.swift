@@ -93,8 +93,9 @@ enum GLMCredentials {
 
     static let encryptedMarker = "enc:v1:"
 
-    /// `~/.zcode/v2/config.json` → an enabled `builtin:*-coding-plan` provider
-    /// with the plan key pasted in. The `baseURL` beside it is the tool's own
+    /// `~/.zcode/v2/config.json` → an enabled ZCode plan provider
+    /// (`builtin:*-coding-plan` or `builtin:*-start-plan`) with the plan key
+    /// pasted in. The `baseURL` beside it is the tool's own
     /// Anthropic endpoint — its *host* decides which console the usage is read
     /// from, the path is dropped: the monitor lives at the console root, and
     /// asking it under `/api/anthropic` answers a misleading 404.
@@ -103,7 +104,7 @@ enum GLMCredentials {
         else { return nil }
 
         for (id, value) in providers.sorted(by: { $0.key < $1.key }) {
-            guard id.contains("coding-plan"), let provider = value as? [String: Any],
+            guard isPlanProvider(id), let provider = value as? [String: Any],
                   let options = provider["options"] as? [String: Any],
                   let key = string(options["apiKey"])
             else { continue }
@@ -117,6 +118,31 @@ enum GLMCredentials {
             return Credential(token: key, baseURL: console, source: "ZCode")
         }
         return nil
+    }
+
+    /// ZCode uses separate provider ids for the paid Coding Plan and the
+    /// account's Start Plan. Both expose the same monitor shape now; a plain
+    /// `builtin:zai` entry remains pay-as-you-go and must not be claimed as a
+    /// plan quota.
+    static func isPlanProvider(_ id: String) -> Bool {
+        id.contains("coding-plan") || id.contains("start-plan")
+    }
+
+    /// Whether ZCode has Z.ai's Start Plan switched on.
+    ///
+    /// Start Plan keys are handled by `zcodePlanKey`; this helper lets the row
+    /// distinguish an active Start Plan from no ZCode configuration when the
+    /// entry has no usable key.
+    static func zcodeHasStartPlan(_ url: URL = zcodeConfigURL) -> Bool {
+        guard let root = dictionary(at: url), let providers = root["provider"] as? [String: Any]
+        else { return false }
+        return providers.contains { id, value in
+            guard id.contains("start-plan"), let provider = value as? [String: Any],
+                  let options = provider["options"] as? [String: Any],
+                  string(options["apiKey"]) != nil
+            else { return false }
+            return provider["enabled"] as? Bool ?? true
+        }
     }
 
     static func zcode(_ url: URL) -> Credential? {

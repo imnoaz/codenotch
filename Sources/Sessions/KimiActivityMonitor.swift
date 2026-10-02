@@ -238,8 +238,22 @@ enum KimiActivity {
         return byWorkDir
     }
 
-    private static func resolve(_ path: String) -> String {
-        URL(fileURLWithPath: path).resolvingSymlinksInPath().path
+    /// Spelled the same on both sides without touching the disk. Resolving
+    /// symlinks looks at every folder along the path, and this runs every two
+    /// seconds on each session's working directory — a project in Documents
+    /// or on a network volume then puts up macOS's "access files in
+    /// Documents" prompt under Codenotch's name (#227). The one difference
+    /// that matters here is macOS's own `/private` alias.
+    static func resolve(_ path: String) -> String {
+        // Plain text only: `standardizingPath` also consults the disk for
+        // `/private` and `..`. Doubled and trailing slashes are all a working
+        // directory reported by the process can differ by.
+        var standard = path.split(separator: "/", omittingEmptySubsequences: true).joined(separator: "/")
+        if path.hasPrefix("/") { standard = "/" + standard }
+        for alias in ["/private/var", "/private/tmp", "/private/etc"] where standard == alias || standard.hasPrefix(alias + "/") {
+            return String(standard.dropFirst("/private".count))
+        }
+        return standard
     }
 
     // MARK: - Process discovery

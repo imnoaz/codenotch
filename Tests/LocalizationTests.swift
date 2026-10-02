@@ -6,13 +6,17 @@ import XCTest
 /// that exists is served, not that every key has one.
 final class LocalizationTests: XCTestCase {
     private let zhHans = Locale(identifier: "zh-Hans")
+    private let zhHant = Locale(identifier: "zh-Hant")
     private let french = Locale(identifier: "fr")
     private let german = Locale(identifier: "de")
     private let japanese = Locale(identifier: "ja")
     private let russian = Locale(identifier: "ru")
     private let ukrainian = Locale(identifier: "uk")
+    private let uzbek = Locale(identifier: "uz")
+    private let turkish = Locale(identifier: "tr")
     private let brazilianPortuguese = Locale(identifier: "pt-BR")
     private let english = Locale(identifier: "en")
+    private let indonesian = Locale(identifier: "id")
     private let now = Date(timeIntervalSince1970: 1_787_900_000)
     private let resetNow = Date(timeIntervalSince1970: 1_700_000_000)
 
@@ -75,6 +79,21 @@ final class LocalizationTests: XCTestCase {
             ResetCopy.text(for: resetNow.addingTimeInterval(-5), now: resetNow, locale: zhHans),
             "正在重置…"
         )
+    }
+
+    /// The last minute counts in seconds, and a locale that translates the
+    /// minutes translates the seconds too — mixing English into one minute out
+    /// of five hours is the kind of thing nobody notices until they see it.
+    func testTheLastMinuteIsTranslatedWhereTheMinutesAre() {
+        let lastMinute = resetNow.addingTimeInterval(42)
+        XCTAssertEqual(ResetCopy.text(for: lastMinute, now: resetNow, locale: english),
+                       "Resets in 42 sec")
+        XCTAssertEqual(ResetCopy.text(for: lastMinute, now: resetNow, locale: zhHans),
+                       "42 秒后重置")
+        XCTAssertEqual(ResetCopy.text(for: lastMinute, now: resetNow, locale: turkish),
+                       "42 sn içinde sıfırlanır")
+        XCTAssertEqual(ResetCopy.countdown(to: lastMinute, now: resetNow, locale: english), "42s")
+        XCTAssertEqual(ResetCopy.countdown(to: lastMinute, now: resetNow, locale: turkish), "42 sn")
     }
 
     func testResetCopyUnderAnHourInEnglishWhenAsked() {
@@ -548,18 +567,152 @@ final class LocalizationTests: XCTestCase {
         )
     }
 
+    // MARK: - Traditional Chinese
+
+    func testCoreCopyInTraditionalChinese() {
+        XCTAssertEqual(
+            ElapsedCopy.text(since: now.addingTimeInterval(-5), now: now, locale: zhHant),
+            "剛剛"
+        )
+        XCTAssertEqual(
+            ElapsedCopy.text(since: now.addingTimeInterval(-6 * 60), now: now, locale: zhHant),
+            "6 分鐘"
+        )
+        XCTAssertEqual(
+            ResetCopy.text(for: resetNow.addingTimeInterval(51 * 60), now: resetNow, locale: zhHant),
+            "51 分鐘後重置"
+        )
+        XCTAssertEqual(
+            percentWindow(0.12).summary(locale: zhHant),
+            "12% 已用 · 88% 剩餘"
+        )
+        XCTAssertEqual(L10n.t("Always show", locale: zhHant), "始終顯示")
+        XCTAssertEqual(L10n.t("Settings…", locale: zhHant), "設定…")
+        XCTAssertEqual(
+            L10n.t("Sign in to \("Perplexity")", locale: zhHant),
+            "登入 Perplexity"
+        )
+    }
+
+    func testTraditionalChineseThresholdAlertKeepsArgumentOrder() {
+        XCTAssertEqual(
+            L10n.t("\(80)% of its \("weekly") limit used.", locale: zhHant),
+            "已用其 weekly 額度的 80%。"
+        )
+    }
+
+    func testCoreCopyInKorean() {
+        let ko = Locale(identifier: "ko")
+        XCTAssertEqual(ElapsedCopy.text(since: now.addingTimeInterval(-5), now: now, locale: ko), "방금")
+        XCTAssertEqual(ElapsedCopy.text(since: now.addingTimeInterval(-6 * 60), now: now, locale: ko), "6분")
+        XCTAssertEqual(
+            ResetCopy.text(for: resetNow.addingTimeInterval(51 * 60), now: resetNow, locale: ko),
+            "51분 후 재설정"
+        )
+        XCTAssertEqual(percentWindow(0.12).summary(locale: ko), "12% 사용 · 88% 남음")
+        XCTAssertEqual(L10n.t("Sign in to \("Perplexity")", locale: ko), "Perplexity에 로그인")
+    }
+
+    // MARK: - Uzbek
+
+    func testCoreCopyInUzbek() {
+        XCTAssertEqual(
+            ElapsedCopy.text(since: now.addingTimeInterval(-5), now: now, locale: uzbek),
+            "hozirgina"
+        )
+        XCTAssertEqual(
+            ElapsedCopy.text(since: now.addingTimeInterval(-6 * 60), now: now, locale: uzbek),
+            "6 daqiqa"
+        )
+        XCTAssertEqual(
+            ResetCopy.text(for: resetNow.addingTimeInterval(51 * 60), now: resetNow, locale: uzbek),
+            "51 daqiqadan soʻng yangilanadi"
+        )
+        XCTAssertEqual(
+            percentWindow(0.12).summary(locale: uzbek),
+            "12% ishlatilgan · 88% qoldi"
+        )
+        XCTAssertEqual(L10n.t("Always show", locale: uzbek), "Doimo")
+        XCTAssertEqual(L10n.t("Settings…", locale: uzbek), "Sozlamalar…")
+        XCTAssertEqual(
+            L10n.t("Sign in to \("Perplexity")", locale: uzbek),
+            "Perplexity ga kirish"
+        )
+    }
+
+    /// Uzbek names the limit before the percentage, so this is the one
+    /// reordered string in the catalog — `%2$@` then `%1$lld`.
+    func testUzbekThresholdAlertKeepsArgumentOrder() {
+        XCTAssertEqual(
+            L10n.t("\(80)% of its \("weekly") limit used.", locale: uzbek),
+            "weekly limitining 80% ishlatilgan."
+        )
+    }
+
+    // MARK: - Turkish
+
+    func testCoreCopyInTurkish() {
+        XCTAssertEqual(
+            ElapsedCopy.text(since: now.addingTimeInterval(-5), now: now, locale: turkish),
+            "az önce"
+        )
+        XCTAssertEqual(
+            ElapsedCopy.text(since: now.addingTimeInterval(-6 * 60), now: now, locale: turkish),
+            "6 dk"
+        )
+        XCTAssertEqual(
+            ResetCopy.text(for: resetNow.addingTimeInterval(51 * 60), now: resetNow, locale: turkish),
+            "51 dk içinde sıfırlanır"
+        )
+        XCTAssertEqual(
+            percentWindow(0.12).summary(locale: turkish),
+            "%12 kullanıldı · %88 kaldı"
+        )
+        XCTAssertEqual(L10n.t("Always show", locale: turkish), "Her zaman")
+        XCTAssertEqual(L10n.t("Settings…", locale: turkish), "Ayarlar…")
+        XCTAssertEqual(
+            L10n.t("Sign in to \("Perplexity")", locale: turkish),
+            "Giriş yap: Perplexity"
+        )
+    }
+
+    /// Turkish names the limit before the percentage, so this string takes
+    /// its values numbered — `%2$@` then `%1$lld`.
+    func testTurkishThresholdAlertKeepsArgumentOrder() {
+        XCTAssertEqual(
+            L10n.t("\(80)% of its \("weekly") limit used.", locale: turkish),
+            "weekly limitinin %80 kadarı kullanıldı."
+        )
+    }
+
     /// Every language the picker offers must resolve to a locale the catalog
     /// is filed under — a region-qualified or unshipped identifier silently
     /// serves another language instead.
     func testEveryOfferedLanguageResolves() {
         XCTAssertEqual(
             AppLanguage.allCases.map(\.rawValue),
-            ["system", "en", "fr", "de", "ja", "pt-BR", "ru", "zh-Hans", "uk"]
+            ["system", "en", "fr", "de", "id", "ja", "ko", "pt-BR", "ru", "zh-Hans",
+             "zh-Hant", "uk", "uz", "tr"]
         )
         XCTAssertNil(AppLanguage.system.locale)
         for language in AppLanguage.allCases where language != .system {
             XCTAssertEqual(language.locale?.identifier, language.rawValue)
         }
+    }
+
+    func testIndonesianTranslations() {
+        XCTAssertEqual(
+            L10n.t("Always show", locale: indonesian),
+            "Selalu tampilkan"
+        )
+        XCTAssertEqual(
+            L10n.t("Settings…", locale: indonesian),
+            "Pengaturan…"
+        )
+        XCTAssertEqual(
+            L10n.t("Quit Codenotch", locale: indonesian),
+            "Keluar dari Codenotch"
+        )
     }
 
     private func percentWindow(_ fraction: Double) -> LimitWindow {

@@ -177,4 +177,16 @@ final class KimiActivitySessionTests: XCTestCase {
         XCTAssertEqual(URL(fileURLWithPath: cwd ?? "").lastPathComponent,
                        URL(fileURLWithPath: FileManager.default.currentDirectoryPath).lastPathComponent)
     }
+
+    /// #227: matched as text, never by resolving symlinks on disk, which
+    /// prompts for Documents and network volumes every poll.
+    func testWorkingDirectoriesAreMatchedWithoutTouchingTheDisk() {
+        XCTAssertEqual(KimiActivity.resolve("/private/var/folders/x/project"), "/var/folders/x/project")
+        XCTAssertEqual(KimiActivity.resolve("/private/tmp/work/"), "/tmp/work")
+        XCTAssertEqual(KimiActivity.resolve("/Users/me//Documents/app"), "/Users/me/Documents/app")
+        XCTAssertEqual(KimiActivity.resolve("/private"), "/private")
+        XCTAssertEqual(KimiActivity.resolve("/privately/owned"), "/privately/owned")
+        // A folder that does not exist still comes back spelled as given.
+        XCTAssertEqual(KimiActivity.resolve("/Volumes/NoSuchShare/code"), "/Volumes/NoSuchShare/code")
+    }
 }

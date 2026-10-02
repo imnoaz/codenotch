@@ -56,11 +56,39 @@ jobs:
           RUSTFLAGS: -C target-feature=+crt-static
         run: cargo build --release --locked -p codenotch-hook --target-dir target/hook
 
+      # The signing key is what the updater in an already-installed copy checks the
+      # download against. Asking the bundler for updater artifacts without one is a
+      # hard error, not a warning, so the artifacts are switched on here rather than
+      # in tauri.conf.json: a fork, or this repository before the key exists, still
+      # gets an installer out of this job.
+      - name: Can this build be signed?
+        id: signing
+        env:
+          KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+        run: |
+          $have = -not [string]::IsNullOrWhiteSpace($env:KEY)
+          "signed=$($have.ToString().ToLower())" >> $env:GITHUB_OUTPUT
+          if (-not $have) {
+            Write-Host '::warning::TAURI_SIGNING_PRIVATE_KEY is not set - building an installer with no update feed.'
+          }
+
       # tauri.bundle.conf.json is merged only here, so a plain `cargo build`
       # never looks for a hook binary that has not been built.
       - name: Build the installer
         working-directory: windows/codenotch
-        run: npx --yes @tauri-apps/cli@2.11.4 build --config tauri.bundle.conf.json -- --locked
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+          SIGNED: ${{ steps.signing.outputs.signed }}
+        run: |
+          # Not $args: that is a PowerShell automatic variable, and splatting it here
+          # silently dropped tauri.bundle.conf.json, so the hook was left out of the
+          # installer and only the smoke test below noticed.
+          $cliArgs = @('--config', 'tauri.bundle.conf.json')
+          if ($env:SIGNED -eq 'true') {
+            $cliArgs += @('--config', '{"bundle":{"createUpdaterArtifacts":true}}')
+          }
+          npx --yes @tauri-apps/cli@2.11.4 build @cliArgs -- --locked
 
       # The bundler names the file after the version, which would change the
       # URL every release. One fixed name lets the README link to
@@ -115,6 +143,43 @@ jobs:
             'the first time. Choose **More info**, then **Run anyway**.'
           ) -join "`n" >> $env:GITHUB_STEP_SUMMARY
 
+      # The feed an installed copy reads. `endpoints` in tauri.conf.json points at
+      # releases/latest/download/latest.json — the same stable URL the README links
+      # the installer to — so publishing a release is the whole of shipping an update.
+      #
+      # Built on every run, not only on a release: a malformed feed that only appears
+      # at release time would be found by users rather than by CI.
+      - name: Build the update feed
+        if: steps.signing.outputs.signed == 'true'
+        run: |
+          $zip = @(Get-ChildItem target/release/bundle/nsis/*-setup.nsis.zip -ErrorAction SilentlyContinue)
+          if ($zip.Count -ne 1) { throw "expected one updater archive, found $($zip.Count)" }
+          Copy-Item $zip[0].FullName Codenotch-Setup.nsis.zip
+          $sigPath = "$($zip[0].FullName).sig"
+          $signature = if (Test-Path $sigPath) { (Get-Content $sigPath -Raw).Trim() } else { '' }
+          $version = (Get-Content codenotch/tauri.conf.json -Raw | ConvertFrom-Json).version
+          $feed = [ordered]@{
+            version = $version
+            pub_date = (Get-Date).ToUniversalTime().ToString('yyyy-MM-ddTHH:mm:ssZ')
+            platforms = [ordered]@{
+              'windows-x86_64' = [ordered]@{
+                signature = $signature
+                url = "https://github.com/vinzdg/codenotch/releases/download/v$version/Codenotch-Setup.nsis.zip"
+              }
+            }
+          }
+          $feed | ConvertTo-Json -Depth 5 | Set-Content latest.json -Encoding utf8
+          Get-Content latest.json
+
+      - uses: actions/upload-artifact@v7
+        if: steps.signing.outputs.signed == 'true'
+        with:
+          name: Codenotch-update-feed-${{ github.sha }}
+          path: |
+            windows/latest.json
+            windows/Codenotch-Setup.nsis.zip
+          if-no-files-found: error
+
       # v* only: the rolling `preview` release belongs to Package, which deletes
       # every asset on it each time it refreshes.
       - name: Attach to the release
@@ -123,3 +188,23 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           TAG: ${{ github.event.release.tag_name }}
         run: gh release upload $env:TAG Codenotch-Setup.exe --clobber
+
+      # Last, and only once the installer is up: latest.json is what sends every
+      # installed copy to that file, so it must never name one that is not there yet.
+      # An unsigned build is refused rather than published — the updater would reject
+      # the download anyway, and a feed nobody can use is worse than no feed.
+      - name: Publish the update feed
+        if: github.event_name == 'release' && startsWith(github.event.release.tag_name, 'v')
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.event.release.tag_name }}
+          SIGNED: ${{ steps.signing.outputs.signed }}
+        run: |
+          if ($env:SIGNED -ne 'true') {
+            throw 'No TAURI_SIGNING_PRIVATE_KEY, so this release carries no update feed and no installed copy will see it. The installer above is fine; see windows/README.md to make the key.'
+          }
+          $feed = Get-Content latest.json -Raw | ConvertFrom-Json
+          if (-not $feed.platforms.'windows-x86_64'.signature) {
+            throw 'the updater archive was not signed; refusing to publish a feed every updater would reject'
+          }
+          gh release upload $env:TAG Codenotch-Setup.nsis.zip latest.json --clobber

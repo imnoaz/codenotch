@@ -133,22 +133,32 @@ struct KiroCLI: Sendable {
         process.standardInput = FileHandle.nullDevice
         let output = Pipe()
         process.standardOutput = output
-        process.standardError = FileHandle.nullDevice
+        // Kept, not discarded: kiro-cli 2.21 prints the whole /usage card to
+        // stderr and leaves stdout empty (#220).
+        let errors = Pipe()
+        process.standardError = errors
 
         let stdout = output.fileHandleForReading
+        let stderr = errors.fileHandleForReading
         let collected = Slot(Data())
-        stdout.readabilityHandler = { handle in
-            let chunk = handle.availableData
-            if chunk.isEmpty {
-                handle.readabilityHandler = nil
-            } else {
-                collected.append(chunk)
+        let collectedErrors = Slot(Data())
+        // Both drained as they fill: a pipe left unread blocks the CLI once
+        // its buffer is full, and the timeout would be the only way out.
+        for (handle, slot) in [(stdout, collected), (stderr, collectedErrors)] {
+            handle.readabilityHandler = { handle in
+                let chunk = handle.availableData
+                if chunk.isEmpty {
+                    handle.readabilityHandler = nil
+                } else {
+                    slot.append(chunk)
+                }
             }
         }
 
         let exited = DispatchSemaphore(value: 0)
         process.terminationHandler = { _ in
             stdout.readabilityHandler = nil
+            stderr.readabilityHandler = nil
             exited.signal()
         }
 
@@ -163,16 +173,20 @@ struct KiroCLI: Sendable {
             _ = kill(pid, SIGKILL)
             if process.isRunning { process.terminate() }
             stdout.readabilityHandler = nil
+            stderr.readabilityHandler = nil
             // Children that inherited stdout keep the parent reaper blocked
             // after a lone kill. Closing the read end is what makes the
             // timeout actually return.
             try? stdout.close()
+            try? stderr.close()
             _ = exited.wait(timeout: .now() + 1)
             Log.usage.debug("kiro-cli /usage timed out")
             throw UsageProviderError.timedOut
         }
         stdout.readabilityHandler = nil
+        stderr.readabilityHandler = nil
         collected.append(drainNonBlocking(stdout))
+        collectedErrors.append(drainNonBlocking(stderr))
 
         guard process.terminationStatus == 0 else {
             Log.usage.debug("kiro-cli /usage exited \(process.terminationStatus)")
@@ -180,11 +194,24 @@ struct KiroCLI: Sendable {
             // practice means it has no login of its own.
             throw UsageProviderError.needsAuth
         }
-        let text = String(data: collected.value, encoding: .utf8)
-        guard let text, !text.isEmpty else {
+        guard let text = usageText(
+            stdout: String(data: collected.value, encoding: .utf8) ?? "",
+            stderr: String(data: collectedErrors.value, encoding: .utf8) ?? ""
+        ) else {
             throw UsageProviderError.badResponse(status: 0)
         }
         return text
+    }
+
+    /// Whichever stream carries the card. Older CLIs print it to stdout and
+    /// newer ones to stderr; either may also hold stray warnings, so the one
+    /// with the card's heading wins, and otherwise whatever was said at all.
+    static func usageText(stdout: String, stderr: String) -> String? {
+        let marker = "Estimated Usage"
+        if stdout.contains(marker) { return stdout }
+        if stderr.contains(marker) { return stderr }
+        let said = stdout.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? stderr : stdout
+        return said.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? nil : said
     }
 
     /// Leftover bytes after the process has exited. `availableData` blocks

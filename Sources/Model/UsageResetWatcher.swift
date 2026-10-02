@@ -17,6 +17,12 @@ struct UsageAlertEvent: Equatable {
     let previousFraction: Double
     let currentFraction: Double
     let resetsAt: Date?
+    /// Set for a notice that is not a reset or a limit (a threshold crossing
+    /// on the notch channel, a test): the card shows these words instead of
+    /// the kind's own.
+    var noticeTitle: String? = nil
+    var noticeSubtitle: String? = nil
+    var noticeStatus: String? = nil
 
     init(
         kind: UsageAlertKind = .reset,
@@ -55,13 +61,16 @@ final class UsageResetWatcher {
     private var states: [String: TrackedState] = [:]
     private let isMuted: (String) -> Bool
     private let deliver: (UsageResetEvent) -> Void
+    private let now: () -> Date
 
     init(
         isMuted: @escaping (String) -> Bool = { _ in false },
-        deliver: @escaping (UsageResetEvent) -> Void = { _ in }
+        deliver: @escaping (UsageResetEvent) -> Void = { _ in },
+        now: @escaping () -> Date = Date.init
     ) {
         self.isMuted = isMuted
         self.deliver = deliver
+        self.now = now
     }
 
     func observe(_ snapshots: [ProviderSnapshot]) {
@@ -71,6 +80,16 @@ final class UsageResetWatcher {
     }
 
     private func observe(_ snapshot: ProviderSnapshot) {
+        // An archived reading is not a baseline: at launch the store publishes
+        // the last run's snapshot, marked stale, and the live fetch that
+        // follows carries a newer reset date or a lower fraction, both of
+        // which read as a reset. That was "Claude has reset" two seconds
+        // after every start. Forgetting the provider here makes the first
+        // live reading the one that only records.
+        guard !snapshot.status.isStale else {
+            states.removeValue(forKey: snapshot.id)
+            return
+        }
         guard let headline = snapshot.headline,
               let fraction = snapshot.usedFraction else { return }
 
@@ -84,9 +103,15 @@ final class UsageResetWatcher {
             return
         }
 
-        let isDateRolled = headline.resetsAt != nil
+        // A later reset timestamp alone is not evidence of a reset: APIs which
+        // report a relative countdown can move that timestamp by a few seconds
+        // on every refresh. The previous window must have actually elapsed
+        // before its replacement can announce a reset.
+        let previousWindowElapsed = previous.resetsAt.map { $0 <= now() } ?? false
+        let isDateRolled = previousWindowElapsed
+            && headline.resetsAt != nil
             && previous.resetsAt != nil
-            && headline.resetsAt != previous.resetsAt
+            && headline.resetsAt! > previous.resetsAt!
             && (previous.lastAlertedResetDate == nil || headline.resetsAt! > previous.lastAlertedResetDate!)
 
         let droppedSignificantly = fraction < previous.fraction
@@ -94,7 +119,15 @@ final class UsageResetWatcher {
 
         let hadSignificantUsage = previous.peakFraction >= 0.15
 
-        if (isDateRolled || droppedSignificantly) && hadSignificantUsage && !isMuted(snapshot.id) {
+        // A percentage-only fallback, for providers that give no reset
+        // timestamp at all, and for the reading after a deadline has passed
+        // whose new window comes back without one (a CLI line that did not
+        // parse, a window that reports null until first used). Before a known
+        // deadline, a lower reading is a correction or fluctuation, not a reset.
+        let canInferResetFromDrop = droppedSignificantly
+            && (previous.resetsAt == nil || previousWindowElapsed)
+
+        if (isDateRolled || canInferResetFromDrop) && hadSignificantUsage && !isMuted(snapshot.id) {
             let event = UsageResetEvent(
                 providerID: snapshot.id,
                 providerName: snapshot.displayName,

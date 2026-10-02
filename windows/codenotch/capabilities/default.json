@@ -1,6 +1,6 @@
 {
   "identifier": "default",
-  "description": "Codenotch notch & settings windows: allow core APIs (event.listen is required for state broadcasts), plus dragging and closing the frameless settings window",
+  "description": "Codenotch notch & settings windows: allow core APIs (event.listen is required for state broadcasts), plus dragging and closing the frameless settings window, and the updater the About pane checks with",
   "windows": [
     "notch",
     "settings"
@@ -8,6 +8,7 @@
   "permissions": [
     "core:default",
     "core:window:allow-start-dragging",
-    "core:window:allow-close"
+    "core:window:allow-close",
+    "updater:default"
   ]
 }

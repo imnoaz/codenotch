@@ -279,12 +279,25 @@ final class ClaudeOwnSessionFilterTests: XCTestCase {
     /// is the filter.
     private var livePID: Int32 { ProcessInfo.processInfo.processIdentifier }
 
-    private func writeSession(pid: Int32, name: String) throws {
+    private func writeSession(pid: Int32, name: String, cwd: String = "/Users/vinz/app") throws {
         let json = """
-        { "pid": \(pid), "sessionId": "\(name)", "cwd": "/Users/vinz/app",
+        { "pid": \(pid), "sessionId": "\(name)", "cwd": "\(cwd)",
           "name": "\(name)", "entrypoint": "claude-desktop" }
         """
         try Data(json.utf8).write(to: directory.appendingPathComponent("\(pid).json"))
+    }
+
+    /// The `/usage` probe runs from `ClaudeUsageCLI.scratchDirectory`, and a
+    /// session filed from there is Codenotch's whichever pid wrote it. Seen on
+    /// a real machine as a "usage-scratch-e1 finished" banner: the probe ran
+    /// `busy`, vanished, and was announced as a turn that ended.
+    func testASessionFromTheUsageScratchDirectoryIsLeftOut() throws {
+        let scratch = ClaudeUsageCLI.scratchLocation(applicationSupport: directory)
+        try writeSession(pid: livePID, name: "usage-scratch-e1", cwd: scratch.path + "/")
+        try writeSession(pid: getppid(), name: "theirs")
+        let found = ClaudeSessionMonitor.read(directory: directory,
+                                              ignoringDirectories: [scratch.path])
+        XCTAssertEqual(found.map(\.name), ["theirs"])
     }
 
     func testTheSessionIsReadWhenNothingIsIgnored() throws {
@@ -306,5 +319,260 @@ final class ClaudeOwnSessionFilterTests: XCTestCase {
         try writeSession(pid: getppid(), name: "theirs")
         let found = ClaudeSessionMonitor.read(directory: directory, ignoring: [livePID])
         XCTAssertEqual(found.map(\.name), ["theirs"])
+    }
+}
+
+
+/// Work done on one account drawn on that account's ring, even when Claude Code
+/// filed it under another profile's directory.
+///
+/// The Claude desktop app leaves `CLAUDE_CONFIG_DIR` unset, so every session it
+/// hosts is registered in `~/.claude/sessions` — the default profile's
+/// directory — whichever account the app is signed in to. Switching account
+/// inside the app moves the credential and not the file, so a second account's
+/// work spun the first account's ring and nothing about the app said otherwise.
+/// The app does record which account hosted each session; this is the join.
+@MainActor
+final class ClaudeSessionOwnershipTests: XCTestCase {
+    private var root: URL!
+    /// `~/Library/Application Support/Claude/claude-code-sessions`, as the app
+    /// lays it out: one directory per account, then per organization.
+    private var desktop: URL!
+    private var personal: URL!    // ~/.claude/sessions
+    private var work: URL!        // ~/.claude-work/sessions
+
+    private let personalAccount = "acc-personal"
+    private let workAccount = "acc-work"
+
+    override func setUpWithError() throws {
+        root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("ClaudeSessionOwnershipTests.\(UUID().uuidString)",
+                                    isDirectory: true)
+        desktop = root.appendingPathComponent("claude-code-sessions")
+        personal = root.appendingPathComponent(".claude/sessions")
+        work = root.appendingPathComponent(".claude-work/sessions")
+        for url in [desktop!, personal!, work!] {
+            try FileManager.default.createDirectory(at: url, withIntermediateDirectories: true)
+        }
+    }
+
+    override func tearDownWithError() throws {
+        try? FileManager.default.removeItem(at: root)
+    }
+
+    // MARK: - The index
+
+    func testAHostedSessionNamesItsAccount() throws {
+        try host("local-1", account: workAccount)
+        XCTAssertEqual(index().account(forHostSession: "local-1"), workAccount)
+    }
+
+    /// The app writes its record a moment after Claude Code registers the
+    /// session, so "not yet" has to stay answerable later — a cached miss would
+    /// leave the session on the wrong ring for its whole life.
+    func testAMissIsNotRemembered() throws {
+        let index = index()
+        XCTAssertNil(index.account(forHostSession: "local-1"))
+
+        try host("local-1", account: workAccount)
+
+        XCTAssertEqual(index.account(forHostSession: "local-1"), workAccount)
+    }
+
+    /// The id comes out of a file another program writes. A separator in it
+    /// would look somewhere else entirely.
+    func testAnIdThatWouldWalkOutOfTheDirectoryIsRefused() throws {
+        try host("local-1", account: workAccount)
+        XCTAssertNil(index().account(forHostSession: "../local-1"))
+        XCTAssertNil(index().account(forHostSession: ""))
+    }
+
+    // MARK: - Who claims a record
+
+    func testADesktopSessionGoesToTheAccountThatHostsIt() throws {
+        try host("local-1", account: workAccount)
+        let record = try desktopRecord(pid: 11, host: "local-1")
+
+        // Filed under the personal profile, as the app always files them...
+        XCTAssertFalse(ownership(of: personal).claims(record, foundIn: personal),
+                       "the personal ring drew the work account's session")
+        XCTAssertTrue(ownership(of: work).claims(record, foundIn: personal),
+                      "the work ring did not adopt its own session")
+    }
+
+    /// A terminal session inherits the variable that chose the directory, so
+    /// the directory is already the right answer and nothing may move it.
+    func testATerminalSessionStaysWhereItWasFiled() throws {
+        try host("local-1", account: workAccount)
+        let record = try record(pid: 12, entrypoint: "cli", host: nil)
+
+        XCTAssertTrue(ownership(of: personal).claims(record, foundIn: personal))
+        XCTAssertFalse(ownership(of: work).claims(record, foundIn: personal))
+    }
+
+    /// Nothing is dropped for want of an answer: a session on the wrong ring is
+    /// a bug, a session on no ring at all is a worse one.
+    func testAnUnresolvableSessionIsLeftWhereItWas() throws {
+        let unknown = try desktopRecord(pid: 13, host: "local-nothing-filed")
+        XCTAssertTrue(ownership(of: personal).claims(unknown, foundIn: personal))
+        XCTAssertFalse(ownership(of: work).claims(unknown, foundIn: personal))
+
+        // An account this machine has no profile signed in to, likewise.
+        try host("local-2", account: "acc-someone-else")
+        let stranger = try desktopRecord(pid: 14, host: "local-2")
+        XCTAssertTrue(ownership(of: personal).claims(stranger, foundIn: personal))
+        XCTAssertFalse(ownership(of: work).claims(stranger, foundIn: personal))
+    }
+
+    // MARK: - End to end, through the monitor
+
+    func testTheWorkRingReadsTheSessionTheAppFiledUnderThePersonalOne() throws {
+        try host("local-1", account: workAccount)
+        try write(pid: livePID, name: "on work", entrypoint: "claude-desktop",
+                  host: "local-1", to: personal)
+
+        let onPersonal = ClaudeSessionMonitor.read(directory: personal,
+                                                   ownership: ownership(of: personal))
+        let onWork = ClaudeSessionMonitor.read(directory: work,
+                                               ownership: ownership(of: work))
+
+        XCTAssertEqual(onPersonal.map(\.name), [])
+        XCTAssertEqual(onWork.map(\.name), ["on work"])
+    }
+
+    /// The sessions that were always attributed correctly must not move.
+    func testEveryOtherSessionIsUnmoved() throws {
+        try host("local-1", account: personalAccount)
+        try write(pid: livePID, name: "desktop here", entrypoint: "claude-desktop",
+                  host: "local-1", to: personal)
+        try write(pid: parentPID, name: "terminal here", entrypoint: "cli",
+                  host: nil, to: personal)
+
+        let onPersonal = ClaudeSessionMonitor.read(directory: personal,
+                                                   ownership: ownership(of: personal))
+        let onWork = ClaudeSessionMonitor.read(directory: work,
+                                               ownership: ownership(of: work))
+
+        XCTAssertEqual(Set(onPersonal.map(\.name)), ["desktop here", "terminal here"])
+        XCTAssertTrue(onWork.isEmpty)
+    }
+
+    // MARK: Two profiles, one account
+
+    /// Both profiles signed in to the same account, the way a second login is
+    /// left behind once the default one has been switched to it.
+    private func sameAccount(of own: URL, shown: Set<String>) -> ClaudeSessionOwnership {
+        var ownership = ClaudeSessionOwnership(
+            own: own,
+            directories: [personal, work],
+            accounts: [personal.path: workAccount, work.path: workAccount],
+            transcripts: [:],
+            index: index()
+        )
+        ownership.isShown = { shown.contains($0.path) }
+        return ownership
+    }
+
+    /// The reported case: the first profile's ring is switched off, so every
+    /// session went to a ring nobody could see while the one that was on, for
+    /// the very same account, showed none.
+    func testASwitchedOffProfileHandsItsSessionsToTheSameAccount() throws {
+        try host("local-1", account: workAccount)
+        let desktop = try desktopRecord(pid: 11, host: "local-1")
+        let terminal = try record(pid: 12, entrypoint: "cli", host: nil)
+        let onlyWork: Set<String> = [work.path]
+
+        XCTAssertTrue(sameAccount(of: work, shown: onlyWork).claims(desktop, foundIn: personal))
+        XCTAssertFalse(sameAccount(of: personal, shown: onlyWork).claims(desktop, foundIn: personal))
+        XCTAssertTrue(sameAccount(of: work, shown: onlyWork).claims(terminal, foundIn: personal),
+                      "a terminal session of the same account follows it too")
+    }
+
+    /// With both rings on, nothing moves: the first profile keeps what the
+    /// ordinary rule gives it.
+    func testWithBothShownTheOrdinaryRuleStands() throws {
+        try host("local-1", account: workAccount)
+        let desktop = try desktopRecord(pid: 11, host: "local-1")
+        let both: Set<String> = [personal.path, work.path]
+
+        XCTAssertTrue(sameAccount(of: personal, shown: both).claims(desktop, foundIn: personal))
+        XCTAssertFalse(sameAccount(of: work, shown: both).claims(desktop, foundIn: personal))
+    }
+
+    /// A different account is never a stand-in: switching a ring off must not
+    /// put its sessions on somebody else's.
+    func testAnotherAccountNeverTakesThemOver() throws {
+        let terminal = try record(pid: 12, entrypoint: "cli", host: nil)
+        let workPath = work.path
+        var ownership = ownership(of: work)
+        ownership.isShown = { $0.path == workPath }
+        XCTAssertFalse(ownership.claims(terminal, foundIn: personal))
+    }
+
+    /// With no ownership at all — one profile on the machine — the read is
+    /// exactly what it always was.
+    func testWithoutOwnershipNothingIsAttributed() throws {
+        try host("local-1", account: workAccount)
+        try write(pid: livePID, name: "mine", entrypoint: "claude-desktop",
+                  host: "local-1", to: personal)
+
+        XCTAssertEqual(ClaudeSessionMonitor.read(directory: personal).map(\.name), ["mine"])
+    }
+
+    // MARK: -
+
+    /// This process and its parent, so the liveness check passes and the only
+    /// thing under test is the attribution.
+    private var livePID: Int32 { ProcessInfo.processInfo.processIdentifier }
+    private var parentPID: Int32 { getppid() }
+
+    private func index() -> ClaudeDesktopSessionIndex {
+        ClaudeDesktopSessionIndex(root: desktop)
+    }
+
+    private func ownership(of own: URL) -> ClaudeSessionOwnership {
+        ClaudeSessionOwnership(
+            own: own,
+            directories: [personal, work],
+            accounts: [personal.path: personalAccount, work.path: workAccount],
+            transcripts: [:],
+            index: index()
+        )
+    }
+
+    /// The app's own record that `id` ran on `account`.
+    private func host(_ id: String, account: String) throws {
+        let organization = desktop.appendingPathComponent(account)
+            .appendingPathComponent("org-1")
+        try FileManager.default.createDirectory(at: organization,
+                                                withIntermediateDirectories: true)
+        try Data("{}".utf8).write(to: organization.appendingPathComponent("\(id).json"))
+    }
+
+    private func desktopRecord(pid: Int32, host: String) throws -> ClaudeSessionRecord {
+        try record(pid: pid, entrypoint: "claude-desktop", host: host)
+    }
+
+    private func record(pid: Int32, entrypoint: String, host: String?) throws
+    -> ClaudeSessionRecord {
+        let object = try JSONSerialization.jsonObject(
+            with: Data(json(pid: pid, name: "r\(pid)", entrypoint: entrypoint, host: host).utf8)
+        ) as! [String: Any]
+        return try XCTUnwrap(ClaudeSessionRecord(json: object))
+    }
+
+    private func write(pid: Int32, name: String, entrypoint: String,
+                       host: String?, to directory: URL) throws {
+        try Data(json(pid: pid, name: name, entrypoint: entrypoint, host: host).utf8)
+            .write(to: directory.appendingPathComponent("\(pid).json"))
+    }
+
+    private func json(pid: Int32, name: String, entrypoint: String, host: String?) -> String {
+        let hostLine = host.map { #""hostSessionId": "\#($0)","# } ?? ""
+        return """
+        { "pid": \(pid), "sessionId": "s\(pid)", "cwd": "/Users/vinz/app",
+          "name": "\(name)", "entrypoint": "\(entrypoint)", \(hostLine)
+          "status": "busy" }
+        """
     }
 }

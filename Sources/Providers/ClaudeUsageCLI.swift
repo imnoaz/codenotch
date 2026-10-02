@@ -67,11 +67,42 @@ struct ClaudeUsageCLI: Sendable {
                                                            in: .userDomainMask)[0],
         fileManager: FileManager = .default
     ) throws -> URL {
-        let directory = applicationSupport
-            .appendingPathComponent("Codenotch", isDirectory: true)
-            .appendingPathComponent("usage-scratch", isDirectory: true)
+        let directory = scratchLocation(applicationSupport: applicationSupport)
         try fileManager.createDirectory(at: directory, withIntermediateDirectories: true)
         return directory
+    }
+
+    /// Where `scratchDirectory` lives, without creating it. The session
+    /// monitor compares working directories against this, so it needs the
+    /// path before the first poll has run.
+    static func scratchLocation(
+        applicationSupport: URL = FileManager.default.urls(for: .applicationSupportDirectory,
+                                                           in: .userDomainMask)[0]
+    ) -> URL {
+        applicationSupport
+            .appendingPathComponent("Codenotch", isDirectory: true)
+            .appendingPathComponent("usage-scratch", isDirectory: true)
+    }
+
+    // MARK: - Its own sessions
+
+    /// The `/usage` processes running right now, by pid.
+    ///
+    /// Each one is a Claude Code process like any other, and files a session
+    /// under `~/.claude/sessions` for the seconds it lives. `ClaudeSessionMonitor`
+    /// steps over these pids (see `ignoredPIDs`) so the probe never reaches the
+    /// notch. Left in, it did worse than draw a row: it ran `busy`, then
+    /// vanished, and the completion watcher announced "usage-scratch-e1
+    /// finished" as a banner on every poll that spawned it.
+    static var runningPIDs: Set<Int32> { running.all }
+    private static let running = PIDRegistry()
+
+    private final class PIDRegistry: @unchecked Sendable {
+        private let lock = NSLock()
+        private var pids: Set<Int32> = []
+        var all: Set<Int32> { lock.lock(); defer { lock.unlock() }; return pids }
+        func insert(_ pid: Int32) { lock.lock(); pids.insert(pid); lock.unlock() }
+        func remove(_ pid: Int32) { lock.lock(); pids.remove(pid); lock.unlock() }
     }
 
     // MARK: - Finding the binary
@@ -206,9 +237,16 @@ struct ClaudeUsageCLI: Sendable {
         process.standardInput = FileHandle.nullDevice
         let output = Pipe()
         process.standardOutput = output
-        process.standardError = Pipe()
+        // Discarded, not piped: a pipe nobody reads fills at 64 KB and stalls
+        // the CLI until the watchdog kills it.
+        process.standardError = FileHandle.nullDevice
 
         try process.run()
+        // Recorded the moment the process exists, ahead of the session file it
+        // will write a moment later once Node is up.
+        let pid = process.processIdentifier
+        running.insert(pid)
+        defer { running.remove(pid) }
 
         let watchdog = DispatchWorkItem {
             if process.isRunning { process.terminate() }

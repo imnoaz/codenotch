@@ -21,6 +21,39 @@ mark was isolated on a transparent background and stored as
 `devin.png`. The image set is marked as a template so
 `ProviderGlyphView` tints it like the other provider glyphs.
 
+## QianwenAI
+
+`Sources/Assets.xcassets/glyph-qianwenai.imageset/qianwenai.png` is the
+QianwenAI / Qwen star, supplied by the maintainer on 2026-09-18 as a colour
+PNG (a purple star crossed by three white bands). `ProviderGlyphView` tints
+everything it draws in one colour, so the colour art cannot be used as is:
+the purple was kept as the mark and the white bands became cut-outs,
+thresholded on saturation so the anti-aliased edges stay soft. The result
+was centred in a 512 px transparent square and stored as a template PNG
+(no vector tracer was available). The earlier favicon-derived SVG it
+replaces is in the git history.
+
+## MiniMax
+
+`Sources/Assets.xcassets/glyph-minimax.imageset/minimax.svg` is Lobe Icons'
+monochrome MiniMax mark, supplied by the maintainer on 2026-09-18, adapted the
+same way as the other marks: `fill="#000"`, numeric `width="24"` /
+`height="24"`, the title and web-only style removed. It is drawn in place of
+the geometric `GlyphOutline.minimax`, which stays as the fallback.
+
+## Z.ai (GLM), Kimi, OpenCode and Command Code
+
+`glyph-glm.imageset/zai.svg`, `glyph-kimi.imageset/kimi.svg` and
+`glyph-opencode.imageset/opencode.svg` are Lobe Icons' monochrome Z.ai, Kimi
+and OpenCode marks, supplied by the maintainer on 2026-09-18 and
+adapted like MiniMax's. `glyph-commandcode.imageset/commandcode.svg` is taken
+from Command Code's own "Logo Mark – Light" (via zonalogo.com): only its ⌘
+path is kept — the black rounded plate and the thin white ring round its edge
+are dropped, since `ProviderGlyphView` tints everything one colour and the
+plate would come out as a solid square — with the `viewBox` cropped to the ⌘
+(`26.18 26.18 84.64 84.64`). The traced `GlyphOutline` shapes stay as
+fallbacks for all four.
+
 ## LM Studio
 
 `Sources/Assets.xcassets/glyph-lmstudio.imageset/lmstudio.svg` is Lobe Icons'
@@ -59,3 +92,18 @@ The upstream MIT copyright and license are included in
 `Sources/Resources/LobeIcons-LICENSE.txt` and copied into the app bundle.
 `LocalModelBrandTests` verifies asset lookup, nonempty nonrectangular native
 rendering and the bundled license; notch and tooltip fixtures cover all marks.
+
+## Apify
+
+`Sources/Assets.xcassets/glyph-apify.imageset/apify.svg` is Apify's own mark,
+the three-piece "A" served as the site favicon at
+[apify.com/favicon.svg](https://apify.com/favicon.svg), retrieved on
+2026-09-25. The original is three colours (blue, green and orange) on a 1080 px
+box; `ProviderGlyphView` tints everything one colour, so the three paths keep
+their geometry and lose their fills (`fill="#000"` on the root, numeric
+`width="24"` / `height="24"`), and the `viewBox` is cropped to the ink
+(`78.22 78.22 923.56 923.56`) so the mark fills its box the way the traced
+outlines do. The gaps between the pieces are what keep it legible in one
+colour. Image set marked as a template with vector data preserved;
+`ApifyProviderTests.testTheGlyphAssetRendersAsAMarkNotASquare` checks the
+native render.

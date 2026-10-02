@@ -6,6 +6,7 @@ final class UsageResetWatcherTests: XCTestCase {
     private var alerts: [UsageResetEvent] = []
     private var muted: Set<String> = []
     private var watcher: UsageResetWatcher!
+    private var clock = Date(timeIntervalSince1970: 1_000)
 
     override func setUp() {
         super.setUp()
@@ -13,7 +14,8 @@ final class UsageResetWatcherTests: XCTestCase {
         muted = []
         watcher = UsageResetWatcher(
             isMuted: { [weak self] in self?.muted.contains($0) ?? false },
-            deliver: { [weak self] in self?.alerts.append($0) }
+            deliver: { [weak self] in self?.alerts.append($0) },
+            now: { [weak self] in self?.clock ?? .distantPast }
         )
     }
 
@@ -32,6 +34,26 @@ final class UsageResetWatcherTests: XCTestCase {
         XCTAssertTrue(alerts.isEmpty, "initial reading records baseline and does not alert")
     }
 
+    /// At launch the store publishes the archived reading, marked stale, and
+    /// the live one follows. A newer reset date between the two is not a reset
+    /// that happened; it is the archive being old.
+    func testAnArchivedReadingIsNotTheBaseline() {
+        let old = Date(timeIntervalSince1970: 1_000_000)
+        var archived = snapshot("claude", "Claude", 0.85, resetsAt: old)
+        archived.status = .stale(since: old)
+        clock = old.addingTimeInterval(3600)
+        watcher.observe([archived])
+        watcher.observe([snapshot("claude", "Claude", 0.10, resetsAt: old.addingTimeInterval(5 * 3600))])
+        XCTAssertTrue(alerts.isEmpty, "the first live reading only records")
+
+        // The next roll-over, seen live against live once the window has
+        // elapsed, is announced.
+        watcher.observe([snapshot("claude", "Claude", 0.60, resetsAt: old.addingTimeInterval(5 * 3600))])
+        clock = old.addingTimeInterval(6 * 3600)
+        watcher.observe([snapshot("claude", "Claude", 0.05, resetsAt: old.addingTimeInterval(10 * 3600))])
+        XCTAssertEqual(alerts.count, 1)
+    }
+
     func testAlertsWhenUsageDropsSignificantly() {
         watcher.observe([snapshot("claude", "Claude", 0.90)])
         watcher.observe([snapshot("claude", "Claude", 0.05)])
@@ -45,14 +67,41 @@ final class UsageResetWatcherTests: XCTestCase {
     }
 
     func testAlertsWhenResetsAtRolledOver() {
-        let date1 = Date(timeIntervalSince1970: 1000)
-        let date2 = Date(timeIntervalSince1970: 2000)
+        let date1 = Date(timeIntervalSince1970: 900)
+        let date2 = Date(timeIntervalSince1970: 2_000)
 
         watcher.observe([snapshot("claude", "Claude", 0.40, resetsAt: date1)])
         watcher.observe([snapshot("claude", "Claude", 0.05, resetsAt: date2)])
 
         XCTAssertEqual(alerts.count, 1)
         XCTAssertEqual(alerts[0].resetsAt, date2)
+    }
+
+    func testDoesNotAlertWhenFutureResetTimestampDriftsLater() {
+        let firstDeadline = Date(timeIntervalSince1970: 2_000)
+        let shiftedDeadline = Date(timeIntervalSince1970: 2_001)
+
+        watcher.observe([snapshot("codex", "Codex", 0.29, resetsAt: firstDeadline)])
+        watcher.observe([snapshot("codex", "Codex", 0.29, resetsAt: shiftedDeadline)])
+
+        XCTAssertTrue(alerts.isEmpty)
+    }
+
+    func testDoesNotAlertForLargeDropBeforeKnownResetDeadline() {
+        let deadline = Date(timeIntervalSince1970: 2_000)
+
+        watcher.observe([snapshot("codex", "Codex", 0.51, resetsAt: deadline)])
+        watcher.observe([snapshot("codex", "Codex", 0.29, resetsAt: deadline)])
+
+        XCTAssertTrue(alerts.isEmpty)
+    }
+
+    /// The window's deadline passed and the fresh reading carries no reset
+    /// date of its own: the drop is the only evidence, and it is enough.
+    func testAlertsWhenTheDeadlinePassedAndTheNewWindowHasNoDate() {
+        watcher.observe([snapshot("claude", "Claude", 0.80, resetsAt: Date(timeIntervalSince1970: 900))])
+        watcher.observe([snapshot("claude", "Claude", 0.04, resetsAt: nil)])
+        XCTAssertEqual(alerts.count, 1)
     }
 
     func testNoAlertForNegligibleFluctuation() {

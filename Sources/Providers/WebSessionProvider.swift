@@ -92,6 +92,24 @@ final class WebSessionProvider: NSObject, UsageProvider {
         /// `origin.host`. MiniMax's session is created on the platform origin
         /// and used on www, so both have to go; DeepSeek has none.
         let associatedHosts: [String]
+        /// Whether the sign-in window asks the probe every 1.5 s while it is
+        /// open, and closes itself once signed in.
+        ///
+        /// Off unless a site asks for it. DeepSeek and MiniMax confirm once, when
+        /// the window closes (#172): their probes are real API calls to
+        /// endpoints that have throttled this app, and polling them while
+        /// someone types a password is how that happened.
+        let pollsDuringSignIn: Bool
+        /// The page under `origin` where this account's plan or usage can be
+        /// seen — what the settings row's manage link opens. A path rather
+        /// than a whole URL because it is always a page on the site the user
+        /// signed into, and not always the obvious one: QianwenAI's console
+        /// serves its SPA only under `/home`, so `origin/usage` is a 404.
+        let managePath: String
+        /// Semantic window roles declared by the site, rather than inferred
+        /// from array order or display copy.
+        let headlineID: String?
+        let weeklyID: String?
         /// Runs in the page as an async function body. Must return a JSON string
         /// `{ "status": Int, "body": String }`.
         let script: String
@@ -103,6 +121,10 @@ final class WebSessionProvider: NSObject, UsageProvider {
              script: String, fidelity: Fidelity = .official,
              authProbeScript: String? = nil,
              associatedHosts: [String] = [],
+             pollsDuringSignIn: Bool = false,
+             managePath: String = "usage",
+             headlineID: String? = nil,
+             weeklyID: String? = nil,
              detailParse: ((String) throws -> ProviderUsageDetail?)? = nil,
              parse: @escaping (String) throws -> [LimitWindow]) {
             self.id = id
@@ -113,6 +135,10 @@ final class WebSessionProvider: NSObject, UsageProvider {
             self.fidelity = fidelity
             self.authProbeScript = authProbeScript
             self.associatedHosts = associatedHosts
+            self.pollsDuringSignIn = pollsDuringSignIn
+            self.managePath = managePath
+            self.headlineID = headlineID
+            self.weeklyID = weeklyID
             self.detailParse = detailParse
             self.parse = parse
         }
@@ -135,7 +161,7 @@ final class WebSessionProvider: NSObject, UsageProvider {
             label: nil,
             plan: nil,
             source: displayName,
-            manageURL: site.origin.appendingPathComponent("usage")
+            manageURL: site.origin.appendingPathComponent(site.managePath)
         )
     }
 
@@ -147,6 +173,9 @@ final class WebSessionProvider: NSObject, UsageProvider {
     private var signInProbeTask: Task<Void, Never>?
     private var isLoaded = false
     private var lastAuthFingerprint: String?
+    /// The URL of the page the sign-in poll last actually probed, so a sheet
+    /// sitting unchanged on one page is not asked the same question every tick.
+    private var lastProbedURL: URL?
     private var switchGate: WebSessionAuthenticationGate?
 
     var onAuthenticated: (() -> Void)?
@@ -317,7 +346,10 @@ final class WebSessionProvider: NSObject, UsageProvider {
         }
 
         // Recorded verbatim so a parser can be written against the real thing.
-        if site.id == "deepseek" {
+        // Not for sites whose response carries account details beyond the
+        // numbers: DeepSeek's, and QianwenAI's console envelope, whose other
+        // fields are undocumented.
+        if ["deepseek", "qianwenai"].contains(site.id) {
             Log.usage.notice("\(self.site.id, privacy: .public) usage response received")
         } else {
             Log.usage.notice("\(self.site.id, privacy: .public) usage -> \(body.prefix(1200), privacy: .public)")
@@ -345,6 +377,8 @@ final class WebSessionProvider: NSObject, UsageProvider {
             fidelity: site.fidelity,
             status: .ok,
             windows: windows,
+            headlineID: site.headlineID,
+            weeklyID: site.weeklyID,
             usageDetail: usageDetail
         )
     }
@@ -426,6 +460,12 @@ final class WebSessionProvider: NSObject, UsageProvider {
             baselineFingerprint: lastAuthFingerprint,
             requiresNewFingerprint: switching
         )
+        // Watched from here on, not only at the end: a sign-in can finish on
+        // another origin — QianwenAI's SSO runs through account.qianwenai.com
+        // and account.aliyun.com before it comes back to /home/ — and a window
+        // closed while the SSO page was still showing used to leave the user
+        // signed in with the app still asking them to sign in.
+        startSignInProbePoll()
         let webView = makeWebViewIfNeeded()
         if let signInWindow {
             signInWindow.makeKeyAndOrderFront(nil)
@@ -465,9 +505,76 @@ final class WebSessionProvider: NSObject, UsageProvider {
             return
         }
         isLoaded = false
-        // Authentication is confirmed once, after the user closes the window.
-        // Keeping the page open avoids false positives while the site is still
-        // loading or restoring its existing session.
+        // Confirmation belongs to the probe, never to the opening: the poll
+        // below watches the settled page and `windowWillClose` takes one last
+        // look, so a page that is still loading or restoring an existing
+        // session cannot pass for a new sign-in on its own.
+    }
+
+    /// Starts the sheet's probe poll. Only a site that can confirm a session
+    /// has one; every other site commits optimistically in
+    /// `signInSheetDidOpen`.
+    private func startSignInProbePoll() {
+        signInProbeTask?.cancel()
+        signInProbeTask = nil
+        lastProbedURL = nil
+        guard site.pollsDuringSignIn, site.authProbeScript != nil else { return }
+        signInProbeTask = Task { [weak self] in
+            while !Task.isCancelled {
+                try? await Task.sleep(nanoseconds: 1_500_000_000)
+                guard !Task.isCancelled, let self else { return }
+                if await self.probeSignInPage() { return }
+            }
+        }
+    }
+
+    /// One probe of the page the sheet is showing. Returns true once the gate
+    /// has accepted a completed sign-in, which also closes the sheet.
+    ///
+    /// Only `site.origin` is probed. While the flow is on an SSO host the
+    /// console is not what is loaded, the probe's own fetch would be
+    /// cross-origin from that page, and its answer would say nothing about the
+    /// session this provider is waiting for.
+    ///
+    /// One probe per *page*, not one per tick. Ticking blindly put forty
+    /// requests a minute on a sheet that can sit open for minutes while its
+    /// owner fetches a verification code — and for DeepSeek and MiniMax those
+    /// probes are real API calls, against the very endpoints this app has been
+    /// throttled by. A sign-in completes by navigating back to the site, so a
+    /// URL that has changed since the last probe is the event worth a request.
+    /// The first tick runs regardless, and it is also what records the
+    /// logged-out sample the gate requires before a normal sign-in may commit;
+    /// a site that signs in without navigating falls back to the
+    /// close-to-commit path `windowWillClose` already provides.
+    private func probeSignInPage() async -> Bool {
+        guard let probe = site.authProbeScript, let webView else { return false }
+        // Guarded first, and deliberately not remembered: a tick that found the
+        // page loading, or sitting on an SSO host, probed nothing, and treating
+        // it as progress would skip the probe that matters once the page comes
+        // back to the console.
+        guard !webView.isLoading,
+              Self.matchesOrigin(webView.url, expected: site.origin)
+        else { return false }
+        guard webView.url != lastProbedURL else { return false }
+        lastProbedURL = webView.url
+
+        guard let result = try? await webView.callAsyncJavaScript(
+                  probe, arguments: [:], in: nil, contentWorld: .page
+              ),
+              let state = Self.authenticationState(from: result)
+        else { return false }
+
+        // Read after the probe, not before: signing out or closing the window
+        // cancels this task and clears the gate, and an answer that arrives in
+        // that window must commit nothing.
+        let committed = switchGate?.observe(
+            authenticated: state.authenticated,
+            fingerprint: state.fingerprint
+        ) ?? false
+        guard committed else { return false }
+        lastAuthFingerprint = state.fingerprint
+        authenticationDidComplete()
+        return true
     }
 
     private struct AuthenticationState {

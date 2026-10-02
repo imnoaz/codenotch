@@ -35,6 +35,23 @@ final class KimiUsageTests: XCTestCase {
         XCTAssertEqual(rolling.duration, 5 * 3600)
     }
 
+    /// Kimi can omit `used` when all quota remains. The remaining and limit
+    /// values still describe a real zero-usage quota, for both row shapes.
+    func testInfersZeroUsageFromLimitAndRemainingWhenUsedIsOmitted() throws {
+        let json = """
+        {"usage":{"limit":"100","remaining":"100","resetTime":"2026-09-15T19:39:34Z"},\
+        "limits":[{"window":{"duration":300,"timeUnit":"TIME_UNIT_MINUTE"},\
+        "detail":{"limit":"100","remaining":"100","resetTime":"2026-09-11T16:39:34Z"}}]}
+        """
+
+        let read = try KimiUsage.read(fromJSON: json)
+        XCTAssertEqual(read.windows.map(\.id), ["weekly", "rolling"])
+        let fractions = read.windows.compactMap(\.usedFraction)
+        XCTAssertEqual(fractions.count, 2)
+        XCTAssertEqual(fractions[0], 0, accuracy: 0.0001)
+        XCTAssertEqual(fractions[1], 0, accuracy: 0.0001)
+    }
+
     /// The reset carries microseconds, which the plain ISO8601 formatter
     /// refuses — reading only that form silently loses every reset time.
     func testReadsAFractionalResetTime() throws {

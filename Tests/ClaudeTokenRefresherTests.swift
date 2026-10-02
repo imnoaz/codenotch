@@ -411,4 +411,14 @@ final class ClaudeTokenRefresherTests: XCTestCase {
         try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: url.path)
         return url
     }
+
+    /// #227: the renewal run starts no MCP servers, keeps no transcript, and
+    /// never runs from the app's own working directory.
+    func testTheRenewalRunIsContainedLikeTheUsageRun() {
+        XCTAssertTrue(ClaudeTokenRefresher.arguments.contains("--strict-mcp-config"))
+        XCTAssertTrue(ClaudeTokenRefresher.arguments.contains("--no-session-persistence"))
+        XCTAssertEqual(ClaudeTokenRefresher.arguments.first, "-p")
+        XCTAssertFalse(ClaudeTokenRefresher.arguments.contains("--mcp-config"),
+                       "the flag is variadic and would swallow what follows it")
+    }
 }

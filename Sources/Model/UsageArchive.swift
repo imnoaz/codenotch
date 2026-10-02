@@ -23,6 +23,10 @@ struct UsageArchive {
         /// continue to open and show their last quota reading.
         let tokenUsage: CodexTokenUsage?
         let usageDetail: ProviderUsageDetail?
+        /// Whose reading this was. Optional for the same reason, and kept so a
+        /// remembered one still says it — a reading restored from the archive
+        /// is exactly when "which account is this?" is hardest to answer.
+        let plan: String?
     }
 
     private let defaults: UserDefaults
@@ -85,7 +89,7 @@ struct UsageArchive {
             } else {
                 windows = entry.windows
             }
-            let snapshot = ProviderSnapshot(
+            var snapshot = ProviderSnapshot(
                 id: entry.id,
                 displayName: entry.displayName,
                 glyph: entry.id == "devin" && entry.glyph == .third ? .devin : entry.glyph,
@@ -97,6 +101,7 @@ struct UsageArchive {
                 tokenUsage: entry.tokenUsage,
                 usageDetail: entry.usageDetail
             )
+            snapshot.plan = entry.plan
             result[entry.id] = (snapshot, entry.fetchedAt)
         }
         return result
@@ -121,7 +126,8 @@ struct UsageArchive {
                 headlineID: $0.snapshot.headlineID,
                 weeklyID: $0.snapshot.weeklyID,
                 tokenUsage: $0.snapshot.tokenUsage,
-                usageDetail: $0.snapshot.usageDetail
+                usageDetail: $0.snapshot.usageDetail,
+                plan: $0.snapshot.plan
             )
         }
         guard let data = try? JSONEncoder().encode(entries) else { return }

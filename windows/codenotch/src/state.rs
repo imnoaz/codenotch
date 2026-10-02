@@ -13,6 +13,14 @@ pub const ST_IDLE: &str = "idle";
 const RUNNING_STALE_MS: u64 = 30 * 60 * 1000; // running with no event for 30 min is treated as an abnormal exit
 const DONE_STALE_MS: u64 = 24 * 3600 * 1000; // stale done entries are removed after 24 h
 const IDLE_DROP_MS: u64 = 10 * 60 * 1000; // idle entries leave the list after 10 min
+/// A session that crashed while waiting on you never sends another event, and attention was never
+/// swept, so its card stayed up for good (#165). A day is longer than anyone leaves a real question.
+const ATTENTION_STALE_MS: u64 = 24 * 3600 * 1000;
+/// Sessions kept at once. Far above any real number of open terminals; it only bounds what a
+/// misbehaving or hostile local sender could make the store hold.
+const MAX_SESSIONS: usize = 200;
+/// A working directory longer than this is not a real one; it is only kept for the card's title.
+const MAX_CWD_CHARS: usize = 1024;
 
 fn now_ms() -> u64 {
     SystemTime::now()
@@ -110,12 +118,19 @@ impl Store {
         if ev.e == "session_end" {
             return self.map.remove(&ev.session_id).is_some();
         }
+        let cwd: String = ev.cwd.chars().take(MAX_CWD_CHARS).collect();
+        if !self.map.contains_key(&ev.session_id) && self.map.len() >= MAX_SESSIONS {
+            // Full: the session heard from longest ago makes room.
+            if let Some(oldest) = self.map.iter().min_by_key(|(_, s)| s.last_event).map(|(k, _)| k.clone()) {
+                self.map.remove(&oldest);
+            }
+        }
         let s = self
             .map
             .entry(ev.session_id.clone())
             .or_insert_with(|| Session {
                 id: ev.session_id.clone(),
-                title: title_of(&ev.cwd, &ev.session_id),
+                title: title_of(&cwd, &ev.session_id),
                 state: ST_IDLE.into(),
                 started: now,
                 total: 0,
@@ -125,7 +140,7 @@ impl Store {
                 model: String::new(),
                 ppid: 0,
                 last_event: now,
-                cwd: ev.cwd.clone(),
+                cwd: cwd.clone(),
                 last_hook: 0,
             });
         // Source arbitration: a session with fresh hook data does not accept watcher inference
@@ -149,9 +164,9 @@ impl Store {
         if !ev.model.is_empty() {
             s.model = ev.model.clone();
         }
-        if !ev.cwd.is_empty() && s.cwd.is_empty() {
-            s.cwd = ev.cwd.clone();
-            s.title = title_of(&ev.cwd, &s.id);
+        if !cwd.is_empty() && s.cwd.is_empty() {
+            s.cwd = cwd.clone();
+            s.title = title_of(&cwd, &s.id);
         }
         match ev.e.as_str() {
             "session_start" => {
@@ -236,7 +251,8 @@ impl Store {
         let before = self.map.len();
         self.map.retain(|_, s| {
             !(s.state == ST_IDLE && now.saturating_sub(s.last_event) > IDLE_DROP_MS
-                || s.state == ST_DONE && now.saturating_sub(s.last_event) > DONE_STALE_MS)
+                || s.state == ST_DONE && now.saturating_sub(s.last_event) > DONE_STALE_MS
+                || s.state == ST_ATTENTION && now.saturating_sub(s.last_event) > ATTENTION_STALE_MS)
         });
         changed || self.map.len() != before
     }
@@ -279,5 +295,63 @@ impl Store {
             clock_24h,
             drag,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn event(e: &str, id: &str, cwd: &str) -> HookEvent {
+        HookEvent {
+            e: e.into(),
+            session_id: id.into(),
+            ppid: 0,
+            cwd: cwd.into(),
+            prompt: String::new(),
+            message: String::new(),
+            tool_name: String::new(),
+            tool_cmd: String::new(),
+            model: String::new(),
+            src: "hook",
+        }
+    }
+
+    #[test]
+    fn the_store_never_holds_more_than_its_cap() {
+        let mut store = Store::default();
+        for n in 0..(MAX_SESSIONS + 50) {
+            store.apply(event("session_start", &format!("s{n}"), "C:/work"));
+        }
+        assert_eq!(store.map.len(), MAX_SESSIONS);
+        assert!(store.map.contains_key(&format!("s{}", MAX_SESSIONS + 49)), "the newest session must be kept");
+    }
+
+    #[test]
+    fn a_working_directory_is_capped() {
+        let mut store = Store::default();
+        let long = "x".repeat(MAX_CWD_CHARS * 4);
+        store.apply(event("session_start", "s", &long));
+        assert_eq!(store.map["s"].cwd.chars().count(), MAX_CWD_CHARS);
+    }
+
+    #[test]
+    fn an_abandoned_attention_card_is_swept() {
+        let mut store = Store::default();
+        store.apply(event("session_start", "s", "C:/work"));
+        let s = store.map.get_mut("s").unwrap();
+        s.state = ST_ATTENTION.into();
+        s.last_event = now_ms().saturating_sub(ATTENTION_STALE_MS + 1000);
+        assert!(store.sweep());
+        assert!(!store.map.contains_key("s"));
+    }
+
+    #[test]
+    fn a_fresh_attention_card_stays() {
+        let mut store = Store::default();
+        store.apply(event("session_start", "s", "C:/work"));
+        store.map.get_mut("s").unwrap().state = ST_ATTENTION.into();
+        store.sweep();
+        assert!(store.map.contains_key("s"));
     }
 }

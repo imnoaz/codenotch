@@ -56,14 +56,23 @@ enum KimiUsage {
         return Read(windows: windows, plan: plan(from: root))
     }
 
-    /// One metered row. `used` and `limit` are decimal strings in the wire
-    /// format, but numbers are accepted too — the denominator decides whether
-    /// there is a fraction to show at all.
+    /// One metered row. Counts are decimal strings in the wire format, but
+    /// numbers are accepted too. When Kimi omits `used`, a valid limit and
+    /// remaining pair still identifies the quota exactly.
     private static func row(id: String, label: String,
                             from detail: [String: Any], duration: TimeInterval) -> LimitWindow? {
-        guard let used = count(detail["used"]) else { return nil }
+        let limit = count(detail["limit"])
+        let used: Int
+        if let reportedUsed = count(detail["used"]) {
+            used = reportedUsed
+        } else if let limit, limit > 0,
+                  let remaining = count(detail["remaining"]), (0...limit).contains(remaining) {
+            used = limit - remaining
+        } else {
+            return nil
+        }
         let resetsAt = (detail["resetTime"] as? String).flatMap(date(from:))
-        guard let limit = count(detail["limit"]), limit > 0 else {
+        guard let limit, limit > 0 else {
             return LimitWindow(id: id, label: label, used: used,
                                resetsAt: resetsAt, duration: duration)
         }

@@ -26,12 +26,56 @@ final class PromptPermission: @unchecked Sendable {
         lock.unlock()
     }
 
+    /// Whether a grant is standing, without spending it.
+    var isOwed: Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        guard let until = owedUntil else { return false }
+        return now() < until
+    }
+
     func take() -> Bool {
         lock.lock()
         defer { lock.unlock() }
         guard let until = owedUntil else { return false }
         owedUntil = nil
         return now() < until
+    }
+}
+
+/// A person's "Deny" to the dialogue they asked for, kept until they ask again.
+///
+/// Without it the answer was overruled within the hour (#98): the next
+/// background read was refused, retried through `/usr/bin/security`, and
+/// handed the secret back anyway — and the Claude CLI and Claude Desktop's
+/// cache never asked at all. Kept in the app's preferences so a relaunch does
+/// not quietly undo it; the designated initialisers take none, so a test never
+/// writes into the installed app's settings.
+final class KeychainRefusal: @unchecked Sendable {
+    private let defaults: UserDefaults?
+    private let key: String
+    private var inMemory = false
+    private let lock = NSLock()
+
+    init(key: String, defaults: UserDefaults?) {
+        self.key = "keychainRefused." + key
+        self.defaults = defaults
+    }
+
+    var isRefused: Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        return defaults?.bool(forKey: key) ?? inMemory
+    }
+
+    func set(_ refused: Bool) {
+        lock.lock()
+        defer { lock.unlock() }
+        if let defaults {
+            if refused { defaults.set(true, forKey: key) } else { defaults.removeObject(forKey: key) }
+        } else {
+            inMemory = refused
+        }
     }
 }
 

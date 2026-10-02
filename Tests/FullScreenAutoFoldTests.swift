@@ -61,13 +61,19 @@ final class FullScreenAutoFoldTests: XCTestCase {
         XCTAssertFalse(FullScreenDetector.isFullScreen(screenBounds: screen, frontmostPID: frontPID, windows: windows))
     }
 
-    func testControllerAutoFoldsWhenActiveSpaceChangesToFullScreen() {
+    func testControllerAutoFoldsWhenActiveSpaceChangesToFullScreen() throws {
         let controller = NotchWindowController()
         controller.show()
         defer { controller.stop() }
+        // `handleActiveSpaceOrAppChange` refuses to fold out from under the
+        // pointer, so this asserts nothing on a machine where the notch has
+        // landed beneath it — which depends on what earlier tests left in
+        // `Preferences`, not on this test.
+        try skipIfPointerOnNotch(controller)
 
         controller.model.isExpanded = true
-        controller.model.isPinned = true
+        controller.model.isPinned = false
+        controller.model.isAlwaysOn = true
         controller.isFullScreenActive = { true }
 
         // Post active space changed notification
@@ -77,13 +83,35 @@ final class FullScreenAutoFoldTests: XCTestCase {
         )
 
         XCTAssertFalse(controller.model.isExpanded, "The notch must fold when entering a full-screen space")
-        XCTAssertFalse(controller.model.isPinned, "The notch must unpin when folded for full-screen")
     }
 
-    func testControllerAutoFoldsWhenFullscreenAppActivates() {
+    func testControllerDoesNotFoldWhenPinnedAndActiveSpaceChangesToFullScreen() {
         let controller = NotchWindowController()
         controller.show()
         defer { controller.stop() }
+
+        controller.model.isExpanded = true
+        controller.model.isPinned = true
+        controller.isFullScreenActive = { true }
+
+        NSWorkspace.shared.notificationCenter.post(
+            name: NSWorkspace.activeSpaceDidChangeNotification,
+            object: nil
+        )
+
+        XCTAssertTrue(controller.model.isExpanded, "A pinned notch must survive entering a full-screen space")
+        XCTAssertTrue(controller.model.isPinned)
+    }
+
+    func testControllerAutoFoldsWhenFullscreenAppActivates() throws {
+        let controller = NotchWindowController()
+        controller.show()
+        defer { controller.stop() }
+        // `handleActiveSpaceOrAppChange` refuses to fold out from under the
+        // pointer, so this asserts nothing on a machine where the notch has
+        // landed beneath it — which depends on what earlier tests left in
+        // `Preferences`, not on this test.
+        try skipIfPointerOnNotch(controller)
 
         controller.model.isExpanded = true
         controller.isFullScreenActive = { true }
@@ -127,10 +155,15 @@ final class FullScreenAutoFoldTests: XCTestCase {
         XCTAssertTrue(controller.model.isExpanded, "With the fold off, a full-screen app must leave the notch alone")
     }
 
-    func testApplyAutoFoldReEvaluatesImmediately() {
+    func testApplyAutoFoldReEvaluatesImmediately() throws {
         let controller = NotchWindowController()
         controller.show()
         defer { controller.stop() }
+        // `handleActiveSpaceOrAppChange` refuses to fold out from under the
+        // pointer, so this asserts nothing on a machine where the notch has
+        // landed beneath it — which depends on what earlier tests left in
+        // `Preferences`, not on this test.
+        try skipIfPointerOnNotch(controller)
 
         controller.model.isAlwaysOn = true
         controller.model.isExpanded = true
@@ -250,10 +283,15 @@ final class FullScreenAutoFoldTests: XCTestCase {
         XCTAssertTrue(controller.model.isExpanded, "A fold in flight must not land after the setting is switched off")
     }
 
-    func testAlwaysOnRestoresExpandedWhenLeavingFullScreen() {
+    func testAlwaysOnRestoresExpandedWhenLeavingFullScreen() throws {
         let controller = NotchWindowController()
         controller.show()
         defer { controller.stop() }
+        // `handleActiveSpaceOrAppChange` refuses to fold out from under the
+        // pointer, so this asserts nothing on a machine where the notch has
+        // landed beneath it — which depends on what earlier tests left in
+        // `Preferences`, not on this test.
+        try skipIfPointerOnNotch(controller)
 
         controller.model.isAlwaysOn = true
         controller.model.isExpanded = true
