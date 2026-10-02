@@ -23,22 +23,25 @@ struct CodexRolloutActivity {
     /// tick. A fresh file with no lifecycle event in its last megabyte is a
     /// turn in progress in every realistic case, and the caller maps a miss
     /// to `.busy` — the same answer the full scan would give.
-    private static let maxWindows = 4
+    private static let maxWindows: UInt64 = 4
+    static let reach = maxWindows * windowBytes
 
     static func state(from url: URL) -> State? {
         guard let handle = try? FileHandle(forReadingFrom: url) else { return nil }
         defer { try? handle.close() }
-        guard var windowEnd = try? handle.seekToEnd() else { return nil }
+        guard let end = try? handle.seekToEnd() else { return nil }
+        return state(of: handle, through: end, notBefore: end > reach ? end - reach : 0)
+    }
 
+    static func state(of handle: FileHandle, through end: UInt64, notBefore floor: UInt64) -> State? {
+        var windowEnd = end
         // The newest lifecycle event wins, so windows are scanned newest
         // first and the first match is the answer. A window's first line is
         // cut in half by the read; the fragment is carried into the earlier
         // window, where the rest of it lives, rather than parsed half a line.
         var carried = Data()
-        var windows = 0
-        while windowEnd > 0, windows < maxWindows {
-            windows += 1
-            let windowStart = windowEnd > windowBytes ? windowEnd - windowBytes : 0
+        while windowEnd > floor {
+            let windowStart = max(floor, windowEnd > windowBytes ? windowEnd - windowBytes : 0)
             guard (try? handle.seek(toOffset: windowStart)) != nil else { return nil }
 
             // `read(upToCount:)` may legally deliver fewer bytes than asked
@@ -74,27 +77,52 @@ struct CodexRolloutActivity {
                 ? Data(lines.removeFirst()) : Data()
 
             for line in lines.reversed() {
-                guard let record = try? JSONSerialization.jsonObject(with: Data(line)) as? [String: Any],
-                      record["type"] as? String == "event_msg",
-                      let payload = record["payload"] as? [String: Any],
-                      let type = payload["type"] as? String else { continue }
-
-                switch type {
-                case "task_started":
-                    return .busy
-                case "task_complete":
-                    return .success
-                case "turn_aborted":
-                    // An aborted turn is not a successful completion. Returning
-                    // nil lets the activity monitor drop it without announcing.
-                    return nil
-                default:
-                    continue
-                }
+                if let event = Lifecycle(line: Data(line)) { return event.state }
             }
             windowEnd = windowStart
         }
         return nil
+    }
+
+    enum Lifecycle {
+        case started
+        case complete
+        case aborted
+
+        private static let names = ["task_started", "task_complete", "turn_aborted"].map { Data($0.utf8) }
+        private static let unicodeEscape = Data([UInt8(ascii: "\\"), UInt8(ascii: "u")])
+
+        /// Whether a line could be a lifecycle event, decided on bytes so that
+        /// most lines never reach the JSON parser. The names are letters and
+        /// `_`, which JSON can spell differently only as `\uXXXX`; the `\n` and
+        /// `\"` that fill command output and messages do not make a line a
+        /// candidate.
+        private static func mayBeEvent(_ line: Data) -> Bool {
+            line.range(of: unicodeEscape) != nil || names.contains(where: { line.range(of: $0) != nil })
+        }
+
+        init?(line: Data, parse: (Data) -> Any? = { try? JSONSerialization.jsonObject(with: $0) }) {
+            guard Self.mayBeEvent(line),
+                  let record = parse(line) as? [String: Any],
+                  record["type"] as? String == "event_msg",
+                  let payload = record["payload"] as? [String: Any] else { return nil }
+            switch payload["type"] as? String {
+            case "task_started": self = .started
+            case "task_complete": self = .complete
+            case "turn_aborted": self = .aborted
+            default: return nil
+            }
+        }
+
+        var state: State? {
+            switch self {
+            case .started: .busy
+            case .complete: .success
+            // An aborted turn is not a successful completion. Nil lets the
+            // activity monitor drop it without announcing.
+            case .aborted: nil
+            }
+        }
     }
 }
 
@@ -108,8 +136,15 @@ struct CodexRolloutActivity {
 /// of megabytes and a couple of dozen are asked about at once. From there the
 /// answer is the bounded scan's, with every later lifecycle event folded in.
 final class CodexRolloutReader {
-    private static let markers = ["task_started", "task_complete", "turn_aborted"].map { Data($0.utf8) }
-    private static let seedWindowBytes = 256 * 1024
+    typealias State = CodexRolloutActivity.State
+
+    private static let seedWindowBytes: UInt64 = 256 * 1024
+    /// The most one call reads, so a burst of writes is never split and parsed
+    /// on the main actor all at once. The rest is read by the calls after it.
+    static let readLimit = 1024 * 1024
+    /// How much of what was read is compared before reading on: a file
+    /// overwritten from its start without truncation grows like an append.
+    private static let witnessBytes: UInt64 = 256
 
     private var url: URL?
     /// Which file at `url` was read: a rollout replaced in place keeps its path
@@ -117,12 +152,18 @@ final class CodexRolloutReader {
     private var inode: UInt64 = 0
     private var size: UInt64 = 0
     private var modified = timespec()
-    /// Bytes consumed up to and including the last newline seen.
+    /// Where the first line not yet folded into `state` starts.
     private var offset: UInt64 = 0
+    private var witness = Data()
+    /// `offset` is inside a line longer than `readLimit`. No lifecycle event
+    /// is that long, so the rest of it is passed over unparsed.
+    private var skippingLine = false
     /// The state after every complete line before `offset`.
-    private var state: CodexRolloutActivity.State?
+    private var state: State?
+    /// The last call stopped at `readLimit`, short of the size it saw.
+    private(set) var isBehind = false
 
-    func state(from url: URL) -> CodexRolloutActivity.State? {
+    func state(from url: URL) -> State? {
         guard let handle = try? FileHandle(forReadingFrom: url),
               let size = try? handle.seekToEnd() else {
             forget()
@@ -134,28 +175,64 @@ final class CodexRolloutReader {
         let known = fstat(handle.fileDescriptor, &info) == 0
         let id = known ? UInt64(info.st_ino) : 0
         let modified = known ? info.st_mtimespec : timespec()
-        // A different file, one that shrank, or one that changed without
-        // growing was rewritten rather than appended to: not a continuation
-        // of what was read before.
+        // A different file, one that shrank, one that changed without
+        // growing, or one whose bytes before `offset` are no longer the ones
+        // read was rewritten rather than appended to: not a continuation of
+        // what was read before.
         let rewritten = size == self.size
             && (modified.tv_sec != self.modified.tv_sec || modified.tv_nsec != self.modified.tv_nsec)
-        if url != self.url || id != inode || size < offset || rewritten {
+        if url != self.url || id != inode || size < self.size || rewritten || !witnessHolds(in: handle) {
             seed(url: url, inode: id, handle: handle, size: size)
         }
         self.size = size
         self.modified = modified
+        return readOn(from: handle, size: size)
+    }
 
-        guard (try? handle.seek(toOffset: offset)) != nil,
-              let chunk = try? handle.readToEnd() else { return state }
+    private func readOn(from handle: FileHandle, size: UInt64) -> State? {
+        isBehind = false
+        let count = Int(min(size - offset, UInt64(Self.readLimit)))
+        guard count > 0, (try? handle.seek(toOffset: offset)) != nil,
+              var chunk = try? handle.read(upToCount: count) else { return state }
+        let reachedEnd = offset + UInt64(chunk.count) >= size
+        isBehind = !reachedEnd
 
-        var lines = chunk.split(separator: 0x0A, omittingEmptySubsequences: true)
+        if skippingLine {
+            guard let newline = chunk.firstIndex(of: 0x0A) else {
+                consume(chunk)
+                return state
+            }
+            consume(chunk[...newline])
+            chunk = chunk[chunk.index(after: newline)...]
+            skippingLine = false
+        }
+
+        let complete = chunk.lastIndex(of: 0x0A).map { chunk[...$0] } ?? chunk[chunk.startIndex..<chunk.startIndex]
+        for line in complete.split(separator: 0x0A, omittingEmptySubsequences: true) {
+            state = Self.apply(Data(line), to: state)
+        }
+        consume(complete)
+
+        let rest = chunk[complete.endIndex...]
+        if rest.count == Self.readLimit {
+            skippingLine = true
+            consume(rest)
+            return state
+        }
         // A last line with no newline after it may still be being written.
         // It counts for this answer if it parses, but is read again next time
-        // rather than committed.
-        let unterminated = chunk.last != 0x0A ? lines.popLast() : nil
-        for line in lines { state = Self.apply(Data(line), to: state) }
-        offset += UInt64(chunk.count - (unterminated?.count ?? 0))
-        return unterminated.map { Self.apply(Data($0), to: state) } ?? state
+        // rather than committed. One cut short by `readLimit` is neither.
+        return reachedEnd && !rest.isEmpty ? Self.apply(Data(rest), to: state) : state
+    }
+
+    private func consume(_ bytes: Data) {
+        offset += UInt64(bytes.count)
+        let keep = Int(Self.witnessBytes)
+        witness = bytes.count >= keep ? Data(bytes.suffix(keep)) : Data((witness + bytes).suffix(keep))
+    }
+
+    private func witnessHolds(in handle: FileHandle) -> Bool {
+        witness.isEmpty || Self.bytes(in: handle, before: offset, count: UInt64(witness.count)) == witness
     }
 
     private func forget() {
@@ -164,57 +241,57 @@ final class CodexRolloutReader {
         size = 0
         modified = timespec()
         offset = 0
+        witness = Data()
+        skippingLine = false
         state = nil
+        isBehind = false
     }
 
-    /// Starts from the bounded scan's answer, positioned after the file's last
-    /// newline. Re-reading the unterminated tail from there is harmless: every
-    /// lifecycle event sets the state outright, so applying one twice in a row
-    /// gives the same answer.
+    /// Starts from the bounded scan's answer over the file's complete lines,
+    /// positioned after the last of them. The unterminated line after that is
+    /// left to the read that follows, so what it says is not remembered until
+    /// it is finished.
     private func seed(url: URL, inode: UInt64, handle: FileHandle, size: UInt64) {
         forget()
         self.url = url
         self.inode = inode
-        state = CodexRolloutActivity.state(from: url)
-        let start = size > UInt64(Self.seedWindowBytes) ? size - UInt64(Self.seedWindowBytes) : 0
-        guard (try? handle.seek(toOffset: start)) != nil,
-              let tail = try? handle.read(upToCount: Int(size - start)) else { return }
-        if let newline = tail.lastIndex(of: 0x0A) {
-            offset = start + UInt64(newline - tail.startIndex) + 1
-        } else {
-            // One line longer than the window: skip it rather than parse a
-            // fragment of it as if it were whole.
-            offset = start == 0 ? 0 : size
+        let floor = size > CodexRolloutActivity.reach ? size - CodexRolloutActivity.reach : 0
+        if let end = Self.lineEnd(in: handle, before: size, notBefore: floor) {
+            state = CodexRolloutActivity.state(of: handle, through: end, notBefore: floor)
+            offset = end
+        } else if floor > 0 {
+            // No line starts within the bounded scan's reach: the end of the
+            // file is one line longer than that.
+            offset = size
+            skippingLine = true
         }
+        witness = Self.bytes(in: handle, before: offset, count: Self.witnessBytes) ?? Data()
     }
 
-    /// The state after one line. Lines that are not lifecycle events leave it
-    /// alone, and are rejected on a byte search before any JSON is parsed.
-    ///
-    /// The search looks for the event names as written, so a line that spells
-    /// one with a `\u` escape would be missed. Codex's JSON writer does not
-    /// escape `_`, and no byte search can be complete against a format that
-    /// allows every character to be escaped.
-    private static func apply(_ line: Data, to state: CodexRolloutActivity.State?) -> CodexRolloutActivity.State? {
-        guard markers.contains(where: { line.range(of: $0) != nil }),
-              let object = try? JSONSerialization.jsonObject(with: line),
-              let record = object as? [String: Any],
-              record["type"] as? String == "event_msg",
-              let payload = record["payload"] as? [String: Any],
-              let type = payload["type"] as? String else { return state }
-
-        switch type {
-        case "task_started":
-            return .busy
-        case "task_complete":
-            return .success
-        case "turn_aborted":
-            // An aborted turn is not a successful completion. Returning
-            // nil lets the activity monitor drop it without announcing.
-            return nil
-        default:
-            return state
+    private static func lineEnd(in handle: FileHandle, before end: UInt64, notBefore floor: UInt64) -> UInt64? {
+        var windowEnd = end
+        while windowEnd > floor {
+            let windowStart = max(floor, windowEnd > seedWindowBytes ? windowEnd - seedWindowBytes : 0)
+            guard (try? handle.seek(toOffset: windowStart)) != nil,
+                  let window = try? handle.read(upToCount: Int(windowEnd - windowStart)) else { return nil }
+            if let newline = window.lastIndex(of: 0x0A) {
+                return windowStart + UInt64(newline - window.startIndex) + 1
+            }
+            windowEnd = windowStart
         }
+        return nil
+    }
+
+    private static func bytes(in handle: FileHandle, before end: UInt64, count: UInt64) -> Data? {
+        let start = end - min(end, count)
+        guard start < end else { return Data() }
+        guard (try? handle.seek(toOffset: start)) != nil else { return nil }
+        return try? handle.read(upToCount: Int(end - start))
+    }
+
+    private static func apply(_ line: Data, to state: State?) -> State? {
+        guard let event = CodexRolloutActivity.Lifecycle(line: line) else { return state }
+        return event.state
     }
 }
 

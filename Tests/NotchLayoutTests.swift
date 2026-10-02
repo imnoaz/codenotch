@@ -1178,15 +1178,93 @@ final class SessionCapTests: XCTestCase {
     /// The row after the last admitted one has to be one that genuinely does
     /// not fit, or the search stopped early and hid a session for nothing.
     func testNothingIsHiddenThatWouldHaveFitted() {
-        for budget in stride(from: CGFloat(150), through: 1200, by: 37) {
-            let n = NotchLayout.sessionsFitting(cardBudget: budget,
-                                                windowCount: NotchLayout.maxWindowCount)
-            guard n < NotchLayout.sessionCeiling else { continue }
-            XCTAssertGreaterThan(
-                NotchLayout.maxCardHeight(sessionCap: n + 1), budget,
-                "\(n + 1) rows would have fitted in \(budget)pt and were hidden anyway"
-            )
+        for paced in [0, NotchLayout.maxWindowCount] {
+            for budget in stride(from: CGFloat(150), through: 1200, by: 37) {
+                let n = NotchLayout.sessionsFitting(cardBudget: budget,
+                                                    windowCount: NotchLayout.maxWindowCount,
+                                                    workweekPaceWindowCount: paced)
+                guard n < NotchLayout.sessionCeiling else { continue }
+                XCTAssertGreaterThan(
+                    NotchLayout.maxCardHeight(sessionCap: n + 1, workweekPaceWindowCount: paced), budget,
+                    "\(n + 1) rows would have fitted in \(budget)pt with \(paced) paced windows and were hidden anyway"
+                )
+            }
         }
+    }
+
+    /// A paced weekly window adds a label line, two thin bars and their gaps:
+    /// 10 + 6 + 5.25 + 6 + 5.25 design pixels plus one body line. The line is
+    /// measured off the system font, so only its share comes from the layout.
+    func testEachPacedWindowAddsItsTwoBars() {
+        let paced = NotchLayout.cardHeight(windowCount: 1, workweekPaceWindowCount: 1)
+        let plain = NotchLayout.cardHeight(windowCount: 1, workweekPaceWindowCount: 0)
+        XCTAssertEqual(paced - plain, 32.5 * 44 / 117 + NotchLayout.cardBodyLineHeight, accuracy: 0.001)
+    }
+
+    private func weeklyClaude(id: String, paced: Int) -> ProviderSnapshot {
+        let windows = (0..<NotchLayout.maxWindowCount).map { index in
+            index < paced
+                ? LimitWindow(id: "weekly_\(index)", label: "Week", usedFraction: 0.3,
+                              resetsAt: Date(timeIntervalSinceNow: 86_400), duration: 7 * 86_400)
+                : LimitWindow(id: "five_hour_\(index)", label: "Session", usedFraction: 0.3)
+        }
+        return ProviderSnapshot(id: id, displayName: "Claude", glyph: .claude, fidelity: .official,
+                                status: .ok, windows: windows)
+    }
+
+    /// The budget `NotchViewModel.cardBudget` solves the cap against, on a side edge.
+    @MainActor private func sideBudget(_ model: NotchViewModel, cellCount: Int) -> CGFloat {
+        model.screenSize.height / model.sizeScale - model.shapeLength(cellCount: cellCount)
+            - 2 * NotchLayout.cardCorner
+    }
+
+    @MainActor func testWithNothingKnownTheCardIsTheShippedWorstCase() {
+        let model = NotchViewModel()
+        XCTAssertEqual(model.maxCardHeight(cellCount: 4), NotchLayout.defaultMaxCardHeight)
+        XCTAssertEqual(model.maxCardHeight(cellCount: 4),
+                       NotchLayout.maxCardHeight(sessionCap: NotchLayout.defaultSessionCap,
+                                                 workweekPaceWindowCount: NotchLayout.maxWindowCount))
+    }
+
+    @MainActor func testWithAScreenButNoSnapshotsTheCardIsSizedAsTheCapWasSolved() {
+        let model = NotchViewModel()
+        model.edge = .right
+        model.screenSize = CGSize(width: 1512, height: 982)
+        let cap = model.sessionCap(cellCount: 4)
+        XCTAssertEqual(cap, NotchLayout.sessionsFitting(cardBudget: sideBudget(model, cellCount: 4),
+                                                        windowCount: NotchLayout.maxWindowCount,
+                                                        workweekPaceWindowCount: 0))
+        XCTAssertEqual(model.maxCardHeight(cellCount: 4),
+                       NotchLayout.maxCardHeight(sessionCap: cap, workweekPaceWindowCount: 0))
+    }
+
+    /// The cap and the card it sizes must count the same paced windows — the
+    /// most any snapshot has — or the card is taller than the budget the cap
+    /// was solved for.
+    @MainActor func testTheCapAndTheCardCountTheSamePacedWindows() {
+        var discriminated = false
+        for height in stride(from: CGFloat(900), through: 2000, by: 23) {
+            let model = NotchViewModel()
+            model.edge = .right
+            model.screenSize = CGSize(width: 1512, height: height)
+            model.snapshots = [weeklyClaude(id: "claude", paced: 1),
+                               weeklyClaude(id: "claude-second", paced: 3)]
+            let budget = sideBudget(model, cellCount: 2)
+            let cap = model.sessionCap(cellCount: 2)
+            XCTAssertEqual(cap, NotchLayout.sessionsFitting(cardBudget: budget,
+                                                            windowCount: NotchLayout.maxWindowCount,
+                                                            workweekPaceWindowCount: 3), "\(height)")
+            XCTAssertEqual(model.maxCardHeight(cellCount: 2),
+                           NotchLayout.cardHeight(windowCount: NotchLayout.maxWindowCount,
+                                                  workweekPaceWindowCount: 3,
+                                                  sessionCount: cap + 1, sessionCap: cap), "\(height)")
+            XCTAssertLessThanOrEqual(model.maxCardHeight(cellCount: 2), budget, "\(height)")
+            if NotchLayout.sessionsFitting(cardBudget: budget, windowCount: NotchLayout.maxWindowCount,
+                                           workweekPaceWindowCount: 0) != cap {
+                discriminated = true
+            }
+        }
+        XCTAssertTrue(discriminated, "no screen height told three paced windows from none")
     }
 
     func testMoreRoomNeverListsFewer() {

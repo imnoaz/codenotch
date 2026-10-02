@@ -509,6 +509,9 @@ final class CodexStoreCache {
     private struct Stamp: Equatable {
         let modified: Date?
         let size: UInt64
+        /// A plain file's inode: one replaced at the same size and time is
+        /// still a different file.
+        var inode: UInt64 = 0
     }
 
     private var rolloutStamp: Stamp?
@@ -518,8 +521,8 @@ final class CodexStoreCache {
     private var threadsStamp: Stamp?
     private var threads: [CodexThread] = []
     /// Each rollout's reader and last answer, by path, with the stamp it was
-    /// read at.
-    private var rolloutStates: [String: (stamp: Stamp, reader: CodexRolloutReader,
+    /// read at — none while the reader has yet to catch up with that stamp.
+    private var rolloutStates: [String: (stamp: Stamp?, reader: CodexRolloutReader,
                                          state: CodexRolloutActivity.State?)] = [:]
 
     /// `CodexStore.newestRollout`, or the last answer when the store has not
@@ -579,7 +582,7 @@ final class CodexStoreCache {
         let reader = rolloutStates[url.path]?.reader ?? CodexRolloutReader()
         let state = reader.state(from: url)
         rolloutStates = rolloutStates.filter { live.contains($0.key) }
-        rolloutStates[url.path] = (stamp, reader, state)
+        rolloutStates[url.path] = (reader.isBehind ? nil : stamp, reader, state)
         return state
     }
 
@@ -598,10 +601,11 @@ final class CodexStoreCache {
                      size: db.1 + wal.1)
     }
 
-    /// `(mtime, size)` of a plain file — a rollout, which has no `-wal`.
+    /// `(mtime, size, inode)` of a plain file — a rollout, which has no `-wal`.
     private static func stamp(ofFile url: URL) -> Stamp {
         let attributes = try? FileManager.default.attributesOfItem(atPath: url.path)
         return Stamp(modified: attributes?[.modificationDate] as? Date,
-                     size: (attributes?[.size] as? NSNumber)?.uint64Value ?? 0)
+                     size: (attributes?[.size] as? NSNumber)?.uint64Value ?? 0,
+                     inode: (attributes?[.systemFileNumber] as? NSNumber)?.uint64Value ?? 0)
     }
 }
