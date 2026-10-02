@@ -465,8 +465,7 @@ final class CodexActivityMonitor: ObservableObject, AgentActivityMonitor {
         let rollouts = Set(threads.compactMap { $0.rollout?.path })
         for thread in threads {
             guard let rollout = thread.rollout,
-                  let modified = (try? FileManager.default
-                      .attributesOfItem(atPath: rollout.path))?[.modificationDate] as? Date
+                  let modified = CodexStoreCache.stamp(ofFile: rollout).modified
             else { continue }
             let activity = cache.rolloutState(of: rollout, keeping: rollouts)
             let isRecent = now.timeIntervalSince(modified) <= staleAfter
@@ -538,8 +537,7 @@ final class CodexActivityMonitor: ObservableObject, AgentActivityMonitor {
     static func state(of root: CodexThread, staleAfter: TimeInterval, now: Date,
                       cache: CodexStoreCache, live: Set<String>) -> AgentSession.State {
         guard let rollout = root.rollout,
-              let modified = (try? FileManager.default
-                  .attributesOfItem(atPath: rollout.path))?[.modificationDate] as? Date,
+              let modified = CodexStoreCache.stamp(ofFile: rollout).modified,
               now.timeIntervalSince(modified) <= staleAfter
         else { return .busy }
         switch cache.rolloutState(of: rollout, keeping: live) {
@@ -572,19 +570,7 @@ final class CodexActivityMonitor: ObservableObject, AgentActivityMonitor {
 
 enum CodexOpenRollouts {
     static func paths(under root: URL, pids suppliedPIDs: [pid_t]? = nil) -> Set<String> {
-        let pids: [pid_t]
-        if let suppliedPIDs {
-            pids = suppliedPIDs
-        } else {
-            var count = proc_listpids(UInt32(PROC_ALL_PIDS), 0, nil, 0)
-            guard count > 0 else { return [] }
-            var listed = [pid_t](repeating: 0,
-                                 count: Int(count) / MemoryLayout<pid_t>.stride + 16)
-            count = proc_listpids(UInt32(PROC_ALL_PIDS), 0, &listed,
-                                  Int32(listed.count * MemoryLayout<pid_t>.stride))
-            guard count > 0 else { return [] }
-            pids = listed.prefix(Int(count) / MemoryLayout<pid_t>.stride).filter(isCodex)
-        }
+        let pids = suppliedPIDs ?? codexProcesses()
 
         let prefix = root.path.hasSuffix("/") ? root.path : root.path + "/"
         var resolvedPrefix = prefix
@@ -622,6 +608,24 @@ enum CodexOpenRollouts {
             }
         }
         return found
+    }
+
+    /// Our own processes only: another user's cannot be asked for its open
+    /// files (PROC_PIDLISTFDS fails), so listing every process on the machine
+    /// paid a `proc_pidinfo` per process for nothing.
+    static func readableProcesses() -> [pid_t] {
+        var count = proc_listpids(UInt32(PROC_UID_ONLY), getuid(), nil, 0)
+        guard count > 0 else { return [] }
+        var listed = [pid_t](repeating: 0,
+                             count: Int(count) / MemoryLayout<pid_t>.stride + 16)
+        count = proc_listpids(UInt32(PROC_UID_ONLY), getuid(), &listed,
+                              Int32(listed.count * MemoryLayout<pid_t>.stride))
+        guard count > 0 else { return [] }
+        return Array(listed.prefix(Int(count) / MemoryLayout<pid_t>.stride))
+    }
+
+    static func codexProcesses() -> [pid_t] {
+        readableProcesses().filter(isCodex)
     }
 
     private static func isCodex(_ pid: pid_t) -> Bool {

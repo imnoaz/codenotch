@@ -166,7 +166,7 @@ final class PriceTable: ObservableObject {
     var pricer: Pricer { Pricer(prices: prices, rate: rate) }
 }
 
-struct Pricer: Sendable {
+struct Pricer: Sendable, Equatable {
     let prices: [ModelPrice]
     let rate: Double
     func local(model: String, input: Int, output: Int, cacheRead: Int, cacheWrite: Int) -> Double? {
@@ -239,9 +239,9 @@ struct CostEstimator: Sendable {
             + Double(cacheRead) * CostStore.kCacheRead + Double(cacheWrite) * CostStore.kCacheWrite
     }
 
-    static func monthStart() -> Int {
+    static func monthStart(at now: Date = Date()) -> Int {
         let cal = Calendar.current
-        return Int(cal.date(from: cal.dateComponents([.year, .month], from: Date()))!.timeIntervalSince1970)
+        return Int(cal.date(from: cal.dateComponents([.year, .month], from: now))!.timeIntervalSince1970)
     }
 }
 

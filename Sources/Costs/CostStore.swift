@@ -47,7 +47,7 @@ struct UsageEvent {
 }
 
 /// A row in the "what used it" list.
-struct ProjectCost: Identifiable {
+struct ProjectCost: Identifiable, Equatable {
     var project: String
     var pct: Double
     var isUnexplained: Bool = false
@@ -100,6 +100,12 @@ final class CostStore {
 
     private var db: OpaquePointer?
     let queue = DispatchQueue(label: "com.vinz.codenotch.costs.cost")
+
+    /// Counts the writes a reader's results depend on, so an unchanged count
+    /// means re-reading would give the same answer. Queue-confined.
+    struct Writes: Equatable { var events = 0, samples = 0 }
+    private var writeCount = Writes()
+    func writes() -> Writes { queue.sync { writeCount } }
     private static let transient = unsafeBitCast(-1, to: sqlite3_destructor_type.self)
 
     // Weights that split a limit delta across turns within one interval. They are
@@ -220,21 +226,26 @@ final class CostStore {
         var offset: Int
     }
 
-    func fileCursor(_ path: String) -> FileCursor? {
+    func allFileCursors() -> [String: FileCursor] {
         queue.sync {
-            guard let st = prepare("SELECT inode, size, offset FROM file_cursor WHERE path = ?1") else { return nil }
+            guard let st = prepare("SELECT path, inode, size, offset FROM file_cursor") else { return [:] }
             defer { sqlite3_finalize(st) }
-            bind(st, 1, path)
-            guard sqlite3_step(st) == SQLITE_ROW else { return nil }
-            return FileCursor(inode: Int(sqlite3_column_int64(st, 0)),
-                              size: Int(sqlite3_column_int64(st, 1)),
-                              offset: Int(sqlite3_column_int64(st, 2)))
+            var cursors: [String: FileCursor] = [:]
+            while sqlite3_step(st) == SQLITE_ROW {
+                guard let path = text(st, 0) else { continue }
+                cursors[path] = FileCursor(inode: Int(sqlite3_column_int64(st, 1)),
+                                           size: Int(sqlite3_column_int64(st, 2)),
+                                           offset: Int(sqlite3_column_int64(st, 3)))
+            }
+            return cursors
         }
     }
 
     /// Writes the events of one file and advances its cursor in a single transaction,
     /// so an interrupted run never leaves the cursor ahead of the stored rows.
-    func commit(events: [UsageEvent], path: String, inode: Int, size: Int, offset: Int, mtime: Double) {
+    /// Returns whether the transaction committed.
+    @discardableResult
+    func commit(events: [UsageEvent], path: String, inode: Int, size: Int, offset: Int, mtime: Double) -> Bool {
         queue.sync {
             exec("BEGIN IMMEDIATE;")
             let sql = """
@@ -248,6 +259,7 @@ final class CostStore {
               cache_read  = MAX(usage_event.cache_read,  excluded.cache_read),
               cache_write = MAX(usage_event.cache_write, excluded.cache_write);
             """
+            var written = 0
             if let st = prepare(sql) {
                 for e in events {
                     bind(st, 1, e.dedupeKey)
@@ -262,7 +274,7 @@ final class CostStore {
                     sqlite3_bind_int64(st, 10, Int64(e.cacheRead))
                     sqlite3_bind_int64(st, 11, Int64(e.cacheWrite))
                     bind(st, 12, e.ccVersion)
-                    sqlite3_step(st)
+                    if sqlite3_step(st) == SQLITE_DONE { written += 1 }
                     sqlite3_reset(st)
                 }
                 sqlite3_finalize(st)
@@ -280,7 +292,9 @@ final class CostStore {
                 sqlite3_step(st)
                 sqlite3_finalize(st)
             }
-            exec("COMMIT;")
+            let committed = exec("COMMIT;")
+            if committed && written > 0 { writeCount.events += 1 }
+            return committed
         }
     }
 
@@ -305,6 +319,7 @@ final class CostStore {
             let ts = Int(date.timeIntervalSince1970)
             let prev = lastSample(window)
             insertSample(window: window, pct: pct, ts: ts, resetsAt: resetsAt)
+            writeCount.samples += 1
 
             guard let prev else { return }             // first sample: nothing to compare
             let delta = pct - prev.pct
@@ -622,13 +637,15 @@ enum CostRange: String, CaseIterable, Identifiable {
     }
 
     /// Start of the range for the share-based views.
-    var start: Date? {
+    var start: Date? { start(at: Date()) }
+
+    func start(at now: Date) -> Date? {
         switch self {
         case .today:
-            return Calendar.current.startOfDay(for: Date())
+            return Calendar.current.startOfDay(for: now)
         case .month:
             let cal = Calendar.current
-            return cal.date(from: cal.dateComponents([.year, .month], from: Date()))
+            return cal.date(from: cal.dateComponents([.year, .month], from: now))
         default:
             return nil
         }

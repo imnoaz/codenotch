@@ -30,13 +30,36 @@ final class CostIndexer {
     private var gitRootCache: [String: String] = [:]
     private var scanScheduled = false
 
+    /// FSEvents can drop or coalesce events (and a whole directory moved into the
+    /// tree reports only the directory), so a full pass still runs this often.
+    static let safetyNetScanInterval: TimeInterval = 600
+    private let safetyNetInterval: TimeInterval
+    private var safetyNet: DispatchSourceTimer?
+    private var pendingPaths: Set<String> = []
+    private var pendingFullScan = false
+    /// Mirror of the store's `file_cursor` table, loaded once; every commit
+    /// updates both. Queue-confined.
+    private var cursors: [String: CostStore.FileCursor]?
+    /// FSEvents reports resolved paths; so does the directory enumerator, which
+    /// makes both spell a file the same way in `file_cursor`.
+    private lazy var resolvedRoot: String = {
+        guard let r = realpath(root.path, nil) else { return root.path }
+        defer { free(r) }
+        return String(cString: r)
+    }()
+
+    private var counters = Counters()
+    struct Counters { var parsedLines = 0, examinedFiles = 0, fullScans = 0 }
+
     /// Called on the indexer queue after a pass that changed something.
     var onChange: (() -> Void)?
 
-    init?(store: CostStore, root: URL, format: Format = .claude) {
+    init?(store: CostStore, root: URL, format: Format = .claude,
+          safetyNetInterval: TimeInterval = CostIndexer.safetyNetScanInterval) {
         self.store = store
         self.root = root
         self.format = format
+        self.safetyNetInterval = safetyNetInterval
         guard FileManager.default.fileExists(atPath: root.path) else { return nil }
     }
 
@@ -44,45 +67,101 @@ final class CostIndexer {
 
     // MARK: Scanning
 
+    /// Watching starts first so a write landing during the initial pass is not
+    /// left to the safety net.
     func start() {
-        scan()
         startWatching()
+        scan()
     }
 
     func scan() {
         queue.async { [weak self] in self?.performScan() }
     }
 
-    private func performScan() {
-        let keys: [URLResourceKey] = [.contentModificationDateKey, .isRegularFileKey]
-        guard let e = FileManager.default.enumerator(at: root, includingPropertiesForKeys: keys,
-                                                     options: [.skipsHiddenFiles]) else { return }
-        var files: [(url: URL, mtime: Date)] = []
-        for case let url as URL in e where url.pathExtension == "jsonl" {
-            let m = (try? url.resourceValues(forKeys: [.contentModificationDateKey]))?.contentModificationDate
-            files.append((url, m ?? .distantPast))
-        }
-        // Newest first: the current period becomes correct before the backfill finishes.
-        files.sort { $0.mtime > $1.mtime }
+    func scanAndWait() { queue.sync { performScan() } }
 
+    /// Feeds `paths` as FSEvents would report them (unflagged) and drains at once.
+    func indexChangedAndWait(_ paths: [String]) {
+        receiveAndWait(paths.map { ($0, FSEventStreamEventFlags(kFSEventStreamEventFlagNone)) })
+    }
+
+    func receiveAndWait(_ events: [(path: String, flags: FSEventStreamEventFlags)]) {
+        queue.sync {
+            for e in events { note(path: e.path, flags: e.flags) }
+            drainPending()
+        }
+    }
+
+    var snapshotCounters: Counters { queue.sync { counters } }
+
+    private func performScan() {
+        counters.fullScans += 1
+        guard let e = FileManager.default.enumerator(at: root, includingPropertiesForKeys: [],
+                                                     options: [.skipsHiddenFiles]) else { return }
+        var files: [(url: URL, stat: FileStat)] = []
+        for case let url as URL in e where url.pathExtension == "jsonl" {
+            guard let s = FileStat(path: url.path) else { continue }
+            files.append((url, s))
+        }
+        index(files)
+    }
+
+    private func indexPending(_ paths: Set<String>) {
+        var files: [(url: URL, stat: FileStat)] = []
+        for path in paths where isIndexable(eventPath: path) {
+            guard let s = FileStat(path: path) else { continue }   // deleted or moved away
+            files.append((URL(fileURLWithPath: path), s))
+        }
+        index(files)
+    }
+
+    private func index(_ files: [(url: URL, stat: FileStat)]) {
+        // Newest first: the current period becomes correct before the backfill finishes.
+        let ordered = files.sorted { $0.stat.mtime > $1.stat.mtime }
         var changed = false
-        for f in files where indexFile(f.url) { changed = true }
+        for f in ordered where indexFile(f.url, f.stat) { changed = true }
         if changed { onChange?() }
+    }
+
+    /// Mirrors the full scan's filter: `.jsonl` under the root, no hidden component
+    /// below the root (the root itself sits under `~/.claude` or `~/.codex`).
+    private func isIndexable(eventPath path: String) -> Bool {
+        guard path.hasSuffix(".jsonl"), path.hasPrefix(resolvedRoot + "/") else { return false }
+        let relative = path.dropFirst(resolvedRoot.count + 1)
+        return !relative.split(separator: "/").contains { $0.hasPrefix(".") }
+    }
+
+    struct FileStat {
+        let inode: Int
+        let size: Int
+        let mtime: Double
+
+        /// `lstat`, like `FileManager.attributesOfItem`, whose values earlier
+        /// releases stored in `file_cursor`.
+        init?(path: String) {
+            var st = stat()
+            guard lstat(path, &st) == 0 else { return nil }
+            inode = Int(truncatingIfNeeded: st.st_ino)
+            size = Int(st.st_size)
+            mtime = Double(st.st_mtimespec.tv_sec) + Double(st.st_mtimespec.tv_nsec) / 1_000_000_000
+        }
     }
 
     /// Returns true when new rows were written.
     @discardableResult
-    private func indexFile(_ url: URL) -> Bool {
+    private func indexFile(_ url: URL, _ stat: FileStat) -> Bool {
+        counters.examinedFiles += 1
         let path = url.path
-        guard let attrs = try? FileManager.default.attributesOfItem(atPath: path) else { return false }
-        let size = (attrs[.size] as? Int) ?? 0
-        let inode = (attrs[.systemFileNumber] as? Int) ?? 0
-        let mtime = (attrs[.modificationDate] as? Date)?.timeIntervalSince1970 ?? 0
+        let size = stat.size
+        let inode = stat.inode
+        let mtime = stat.mtime
 
+        if cursors == nil { cursors = store.allFileCursors() }
         var offset = 0
-        if let cursor = store.fileCursor(path) {
+        if let cursor = cursors?[path] {
             if cursor.inode != inode || size < cursor.offset {
                 offset = 0                          // rotated or truncated: re-read
+                codexContext[path] = nil            // the old file's session and model are not this one's
             } else if size == cursor.offset {
                 return false                        // nothing appended
             } else {
@@ -112,6 +191,7 @@ final class CostIndexer {
                 guard buf[i] == 0x0A else { continue }
                 if i > start {
                     let slice = UnsafeBufferPointer(rebasing: buf[start..<i])
+                    counters.parsedLines += 1
                     switch format == .claude ? parse(slice, folder: folder) : parseCodex(slice, path: path) {
                     case .event(let e): events.append(e)
                     case .malformed:    malformed += 1
@@ -124,8 +204,10 @@ final class CostIndexer {
         }
 
         guard consumed > 0 else { return false }   // no complete line yet
-        store.commit(events: events, path: path, inode: inode, size: size,
-                     offset: offset + consumed, mtime: mtime)
+        if store.commit(events: events, path: path, inode: inode, size: size,
+                        offset: offset + consumed, mtime: mtime) {
+            cursors?[path] = CostStore.FileCursor(inode: inode, size: size, offset: offset + consumed)
+        }
         store.recordParseErrors(path: path, count: malformed, reason: "malformed line")
         return !events.isEmpty
     }
@@ -270,7 +352,12 @@ final class CostIndexer {
         let cached = int(last["cached_input_tokens"]) ?? 0
         let cacheWrite = int(last["cache_write_input_tokens"]) ?? 0
         let ts = Int(date.timeIntervalSince1970)
-        guard inputAll + output > 0 else { return .skip }
+        // A corrupt or hostile line must not trap the indexer: negative counts
+        // are meaningless and a sum past Int.max cannot be a real turn.
+        guard inputAll >= 0, output >= 0, cached >= 0, cacheWrite >= 0 else { return .malformed }
+        let (total, overflow) = inputAll.addingReportingOverflow(output)
+        guard !overflow else { return .malformed }
+        guard total > 0 else { return .skip }
         return .event(UsageEvent(
             ts: ts, sessionId: sessionId,
             dedupeKey: "c:\(sessionId):\(ts):\(inputAll):\(output)",
@@ -282,7 +369,8 @@ final class CostIndexer {
 
     private func int(_ any: Any?) -> Int? {
         if let i = any as? Int { return i }
-        if let d = any as? Double { return Int(d) }
+        // `Double(Int.max)` is 2^63, one past Int.max, hence `<`.
+        if let d = any as? Double, d >= Double(Int.min), d < Double(Int.max) { return Int(d) }
         return nil
     }
 
@@ -340,25 +428,52 @@ final class CostIndexer {
 
     // MARK: Watching
 
+    private static let fullScanFlags = FSEventStreamEventFlags(
+        kFSEventStreamEventFlagMustScanSubDirs | kFSEventStreamEventFlagUserDropped
+            | kFSEventStreamEventFlagKernelDropped | kFSEventStreamEventFlagRootChanged
+            | kFSEventStreamEventFlagMount | kFSEventStreamEventFlagUnmount)
+
     private func startWatching() {
+        startSafetyNet()
+
         var context = FSEventStreamContext(version: 0,
                                            info: Unmanaged.passUnretained(self).toOpaque(),
                                            retain: nil, release: nil, copyDescription: nil)
-        let callback: FSEventStreamCallback = { _, info, _, _, _, _ in
+        // Runs on `queue` (FSEventStreamSetDispatchQueue below).
+        let callback: FSEventStreamCallback = { _, info, count, paths, flags, _ in
             guard let info else { return }
-            Unmanaged<CostIndexer>.fromOpaque(info).takeUnretainedValue().coalescedScan()
+            let indexer = Unmanaged<CostIndexer>.fromOpaque(info).takeUnretainedValue()
+            let list = unsafeBitCast(paths, to: NSArray.self)
+            for i in 0..<count {
+                indexer.note(path: list[i] as? String ?? "", flags: flags[i])
+            }
+            indexer.scheduleDrain()
         }
+        let flags = kFSEventStreamCreateFlagNoDefer | kFSEventStreamCreateFlagFileEvents
+            | kFSEventStreamCreateFlagUseCFTypes | kFSEventStreamCreateFlagWatchRoot
         guard let s = FSEventStreamCreate(nil, callback, &context,
                                           [root.path] as CFArray,
                                           FSEventStreamEventId(kFSEventStreamEventIdSinceNow),
                                           2.0,   // latency doubles as debounce
-                                          FSEventStreamCreateFlags(kFSEventStreamCreateFlagNoDefer)) else { return }
+                                          FSEventStreamCreateFlags(flags)) else { return }
         FSEventStreamSetDispatchQueue(s, queue)
         FSEventStreamStart(s)
         stream = s
     }
 
+    /// Leeway scales with the interval: 30 s at the default 600 s.
+    func startSafetyNet() {
+        let timer = DispatchSource.makeTimerSource(queue: queue)
+        timer.schedule(deadline: .now() + safetyNetInterval, repeating: safetyNetInterval,
+                       leeway: .milliseconds(Int(safetyNetInterval * 1000 / 20)))
+        timer.setEventHandler { [weak self] in self?.performScan() }
+        timer.resume()
+        safetyNet = timer
+    }
+
     private func stopWatching() {
+        safetyNet?.cancel()
+        safetyNet = nil
         guard let stream else { return }
         FSEventStreamStop(stream)
         FSEventStreamInvalidate(stream)
@@ -366,17 +481,38 @@ final class CostIndexer {
         self.stream = nil
     }
 
+    /// Queue-confined. A directory renamed into the tree reports only itself, not
+    /// the transcripts inside, so it needs a full pass like a dropped-events flag.
+    private func note(path: String, flags: FSEventStreamEventFlags) {
+        let isDirRename = flags & FSEventStreamEventFlags(kFSEventStreamEventFlagItemIsDir) != 0
+            && flags & FSEventStreamEventFlags(kFSEventStreamEventFlagItemRenamed) != 0
+        if flags & Self.fullScanFlags != 0 || isDirRename {
+            pendingFullScan = true
+        } else if path.hasSuffix(".jsonl") {
+            pendingPaths.insert(path)
+        }
+    }
+
     /// FSEvents can fire repeatedly while a session is being written; collapse
     /// bursts into one pass.
-    private func coalescedScan() {
-        queue.async { [weak self] in
-            guard let self, !self.scanScheduled else { return }
-            self.scanScheduled = true
-            self.queue.asyncAfter(deadline: .now() + 1.5) { [weak self] in
-                guard let self else { return }
-                self.scanScheduled = false
-                self.performScan()
-            }
+    private func scheduleDrain() {
+        guard !scanScheduled, pendingFullScan || !pendingPaths.isEmpty else { return }
+        scanScheduled = true
+        queue.asyncAfter(deadline: .now() + 1.5) { [weak self] in
+            guard let self else { return }
+            self.scanScheduled = false
+            self.drainPending()
+        }
+    }
+
+    private func drainPending() {
+        let paths = pendingPaths
+        pendingPaths.removeAll()
+        if pendingFullScan {
+            pendingFullScan = false
+            performScan()
+        } else if !paths.isEmpty {
+            indexPending(paths)
         }
     }
 }

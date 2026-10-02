@@ -43,6 +43,27 @@ enum FullScreenDetector {
         return false
     }
 
+    /// The frontmost app's layer 0 windows — the only ones `isFullScreen`
+    /// looks at — read straight from the CoreFoundation dictionaries.
+    /// Bridging the whole list to `[[String: Any]]` hashed every key of every
+    /// window on screen as a Swift `String`, every two seconds, and was most
+    /// of what this cost Codenotch outside the WindowServer round trip.
+    static func candidateWindows(
+        in windowInfoList: CFArray,
+        frontmostPID: pid_t
+    ) -> [(pid: pid_t, layer: Int, bounds: CGRect)] {
+        var extractedWindows: [(pid: pid_t, layer: Int, bounds: CGRect)] = []
+        for case let info as NSDictionary in windowInfoList as NSArray {
+            guard let pid = info[kCGWindowOwnerPID] as? pid_t, pid == frontmostPID,
+                  let layer = info[kCGWindowLayer] as? Int, layer == 0,
+                  let boundsDict = info[kCGWindowBounds] as? NSDictionary,
+                  let bounds = CGRect(dictionaryRepresentation: boundsDict as CFDictionary)
+            else { continue }
+            extractedWindows.append((pid: pid, layer: layer, bounds: bounds))
+        }
+        return extractedWindows
+    }
+
     /// Queries WindowServer and NSWorkspace to determine if the frontmost app
     /// is occupying the entire `screen`.
     static func isFullScreenAppFrontmost(on screen: NSScreen? = NSScreen.main) -> Bool {
@@ -69,21 +90,11 @@ enum FullScreenDetector {
             safeTop = 0
         }
 
-        if let windowInfoList = CGWindowListCopyWindowInfo([.optionOnScreenOnly, .excludeDesktopElements], kCGNullWindowID) as? [[String: Any]] {
-            var extractedWindows: [(pid: pid_t, layer: Int, bounds: CGRect)] = []
-            for info in windowInfoList {
-                guard let pid = info[kCGWindowOwnerPID as String] as? pid_t,
-                      let layer = info[kCGWindowLayer as String] as? Int,
-                      let boundsDict = info[kCGWindowBounds as String] as? NSDictionary,
-                      let bounds = CGRect(dictionaryRepresentation: boundsDict as CFDictionary)
-                else { continue }
-                extractedWindows.append((pid: pid, layer: layer, bounds: bounds))
-            }
-
+        if let windowInfoList = CGWindowListCopyWindowInfo([.optionOnScreenOnly, .excludeDesktopElements], kCGNullWindowID) {
             if isFullScreen(
                 screenBounds: cgScreenBounds,
                 frontmostPID: frontApp.processIdentifier,
-                windows: extractedWindows,
+                windows: candidateWindows(in: windowInfoList, frontmostPID: frontApp.processIdentifier),
                 safeAreaTopInset: safeTop
             ) {
                 return true

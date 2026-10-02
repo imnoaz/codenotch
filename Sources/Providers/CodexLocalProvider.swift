@@ -506,7 +506,7 @@ extension CodexThread {
 /// main file's mtime does not move until a checkpoint — so a database counts
 /// as changed when either file's stamp does.
 final class CodexStoreCache {
-    private struct Stamp: Equatable {
+    struct Stamp: Equatable {
         let modified: Date?
         let size: UInt64
         /// A plain file's inode: one replaced at the same size and time is
@@ -589,23 +589,31 @@ final class CodexStoreCache {
     /// `(mtime, size)` of the database merged with its `-wal`, either of
     /// which moves first. A missing file contributes nothing — an absent
     /// store is also an answer worth remembering rather than re-paying for.
-    private static func stamp(of url: URL) -> Stamp {
-        func pair(_ url: URL) -> (Date?, UInt64) {
-            let attributes = try? FileManager.default.attributesOfItem(atPath: url.path)
-            return (attributes?[.modificationDate] as? Date,
-                    (attributes?[.size] as? NSNumber)?.uint64Value ?? 0)
-        }
-        let db = pair(url)
-        let wal = pair(URL(fileURLWithPath: url.path + "-wal"))
-        return Stamp(modified: [db.0, wal.0].compactMap { $0 }.max(),
-                     size: db.1 + wal.1)
+    static func stamp(of url: URL) -> Stamp {
+        let db = stamp(ofPath: url.path)
+        let wal = stamp(ofPath: url.path + "-wal")
+        return Stamp(modified: [db.modified, wal.modified].compactMap { $0 }.max(),
+                     size: db.size + wal.size)
     }
 
     /// `(mtime, size, inode)` of a plain file — a rollout, which has no `-wal`.
-    private static func stamp(ofFile url: URL) -> Stamp {
-        let attributes = try? FileManager.default.attributesOfItem(atPath: url.path)
-        return Stamp(modified: attributes?[.modificationDate] as? Date,
-                     size: (attributes?[.size] as? NSNumber)?.uint64Value ?? 0,
-                     inode: (attributes?[.systemFileNumber] as? NSNumber)?.uint64Value ?? 0)
+    static func stamp(ofFile url: URL) -> Stamp {
+        stamp(ofPath: url.path)
+    }
+
+    /// One `lstat`, where `attributesOfItem` — which also `lstat`s, so a
+    /// symlink still stamps as the link — added `getattrlist` and `getxattr`
+    /// calls per file, every two seconds, for every live rollout.
+    private static func stamp(ofPath path: String) -> Stamp {
+        var info = stat()
+        guard lstat(path, &info) == 0 else { return Stamp(modified: nil, size: 0) }
+        // Offset before adding the nanoseconds, as Foundation does: summing
+        // them first rounds to a different Date about half the time.
+        return Stamp(modified: Date(timeIntervalSinceReferenceDate:
+                                        TimeInterval(info.st_mtimespec.tv_sec)
+                                        - Date.timeIntervalBetween1970AndReferenceDate
+                                        + TimeInterval(info.st_mtimespec.tv_nsec) / 1_000_000_000),
+                     size: UInt64(info.st_size),
+                     inode: UInt64(info.st_ino))
     }
 }
